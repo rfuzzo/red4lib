@@ -20,6 +20,10 @@ extern "C" {
     ) -> i32;
 }
 
+/////////////////////////////////////////////////////////////////////////////////////////
+/// RED4 LIB
+/////////////////////////////////////////////////////////////////////////////////////////
+
 #[derive(Debug, Clone)]
 pub struct Archive {
     pub header: Header,
@@ -266,7 +270,14 @@ impl LxrsFooter {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
+/// READERS
+/////////////////////////////////////////////////////////////////////////////////////////
 
+/// Read a null_terminated_string from cursor
+///
+/// # Errors
+///
+/// This function will return an error if from_utf8_lossy fails
 fn read_null_terminated_string<R>(reader: &mut R) -> io::Result<String>
 where
     R: Read,
@@ -286,6 +297,10 @@ where
 
     Ok(String::from_utf8_lossy(&buffer).to_string())
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////
+/// HELPERS
+/////////////////////////////////////////////////////////////////////////////////////////
 
 /// Get top-level files of a folder with given extension
 pub fn get_files(folder_path: &Path, extension: &str) -> Vec<PathBuf> {
@@ -319,8 +334,14 @@ pub fn fnv1a64_hash_path(path: &Path) -> u64 {
     hasher.finish()
 }
 
+/// Get vanilla resource path hashes https://www.cyberpunk.net/en/modding-support
+pub fn get_red4_hashes() -> HashMap<u64, String> {
+    let csv_data = include_bytes!("metadata-resources.csv");
+    parse_csv_data(csv_data)
+}
+
 /// Reads the metadata-resources.csv (csv of hashes and strings) from https://www.cyberpunk.net/en/modding-support
-pub fn parse_csv_data(csv_data: &[u8]) -> HashMap<u64, String> {
+fn parse_csv_data(csv_data: &[u8]) -> HashMap<u64, String> {
     let mut reader = csv::ReaderBuilder::new().from_reader(csv_data);
     let mut csv_map: HashMap<u64, String> = HashMap::new();
 
@@ -345,6 +366,8 @@ pub fn parse_csv_data(csv_data: &[u8]) -> HashMap<u64, String> {
     csv_map
 }
 
+/////////////////////////////////////////////////////////////////////////////////////////
+/// TESTS
 /////////////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
