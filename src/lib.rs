@@ -326,6 +326,13 @@ pub fn get_files(folder_path: &Path, extension: &str) -> Vec<PathBuf> {
     files
 }
 
+/// Calculate FNV1a64 hash of a String
+pub fn fnv1a64_hash_string(str: &String) -> u64 {
+    let mut hasher = fnv::FnvHasher::default();
+    hasher.write(str.as_bytes());
+    hasher.finish()
+}
+
 /// Calculate FNV1a64 hash of a PathBuf
 pub fn fnv1a64_hash_path(path: &Path) -> u64 {
     let path_string = path.to_string_lossy();

@@ -9,20 +9,23 @@ macro_rules! p {
 }
 
 fn main() {
-    let dst = Config::new("kraken").build_target("kraken_static").build();
+    let mut cfg = Config::new("kraken");
+    //cfg.profile("RelWithDebInfo");
+    cfg.profile("Debug");
+    let cp = cfg.get_profile().to_owned();
+    p!("CMAKE_PROFILE : {}", cp);
+    let dst = cfg.build_target("kraken_static").build();
 
     // info
     let profile = std::env::var("PROFILE").unwrap();
     p!("PROFILE : {}", profile);
-    if profile == "debug" {
-        p!("DST: {}", dst.display());
-    }
+    p!("DST: {}", dst.display());
 
     // link
     println!(
         "cargo:rustc-link-search=native={}/build/bin/CMake/{}",
         dst.display(),
-        profile
+        cp
     );
     println!("cargo:rustc-link-lib=static=kraken_static");
 
