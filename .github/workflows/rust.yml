@@ -19,7 +19,9 @@ jobs:
           submodules: 'true'
 
       - name: unzip resources
-        run: Expand-Archive -Path .\metadata-resources.zip -DestinationPath .\
+        run: |
+          cd src
+          Expand-Archive -Path .\metadata-resources.zip -DestinationPath .\
       
       - uses: actions-rs/toolchain@v1
         with:
