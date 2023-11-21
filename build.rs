@@ -11,7 +11,7 @@ macro_rules! p {
 fn main() {
     let mut cfg = Config::new("kraken");
     //cfg.profile("RelWithDebInfo");
-    cfg.profile("Debug");
+    //cfg.profile("Debug");
     let cp = cfg.get_profile().to_owned();
     p!("CMAKE_PROFILE : {}", cp);
     let dst = cfg.build_target("kraken_static").build();

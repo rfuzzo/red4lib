@@ -225,10 +225,10 @@ impl LxrsFooter {
                 let mut compressed_buffer = vec![0; buffer_len];
                 cursor.read_exact(&mut compressed_buffer[..])?;
 
-                let output_buffer_len = size as usize;
+                let output_buffer_len = size as usize * 2;
                 let mut output_buffer = vec![0; output_buffer_len];
 
-                let result = unsafe {
+                let _result = unsafe {
                     Kraken_Decompress(
                         compressed_buffer.as_ptr(),
                         compressed_buffer.len() as i64,
@@ -238,15 +238,16 @@ impl LxrsFooter {
                 };
 
                 // read bytes
-                if result as u32 == size {
-                    let mut inner_cursor = io::Cursor::new(&output_buffer);
-                    for _i in 0..count {
-                        // read NullTerminatedString
-                        if let Ok(string) = read_null_terminated_string(&mut inner_cursor) {
-                            files.push(string);
-                        }
+                //if result as u32 == size {
+                output_buffer.resize(size as usize, 0);
+                let mut inner_cursor = io::Cursor::new(&output_buffer);
+                for _i in 0..count {
+                    // read NullTerminatedString
+                    if let Ok(string) = read_null_terminated_string(&mut inner_cursor) {
+                        files.push(string);
                     }
                 }
+                //}
             }
             Ordering::Less => {
                 // error
