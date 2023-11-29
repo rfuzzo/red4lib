@@ -1,13 +1,18 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
-use byteorder::{LittleEndian, ReadBytesExt};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::hash::Hasher;
-use std::io::{self, Cursor, Read, Result};
+use std::io::{self, BufWriter, Read, Result, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
+
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use sha1::{Digest, Sha1};
+use strum::IntoEnumIterator;
+use strum_macros::{Display, EnumIter};
+use walkdir::WalkDir;
 
 #[link(name = "kraken_static")]
 extern "C" {
@@ -18,13 +23,21 @@ extern "C" {
         outputBuffer: *mut u8,
         outputBufferSize: i64,
     ) -> i32;
+
+    // EXPORT int Kraken_Compress(uint8* src, size_t src_len, byte* dst, int level)
+    fn Kraken_Compress(
+        buffer: *const u8,
+        bufferSize: i64,
+        outputBuffer: *mut u8,
+        level: i32,
+    ) -> i32;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
 /// RED4 LIB
 /////////////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Archive {
     pub header: Header,
     pub index: Index,
@@ -85,6 +98,99 @@ impl Archive {
             .map(|f| f.1.name_hash_64)
             .collect::<Vec<_>>()
     }
+
+    // pack and write an archive from folder
+
+    // Assuming you have a struct Archive and other necessary structs and enums
+
+    pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> io::Result<()> {
+        if !infolder.exists() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, ""));
+        }
+
+        if !outpath.exists() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, ""));
+        }
+
+        let archive_name = if let Some(name) = modname {
+            format!("{}.archive", name)
+        } else {
+            format!(
+                "{}.archive",
+                infolder.file_name().unwrap_or_default().to_string_lossy()
+            )
+        };
+
+        // collect files
+        let mut included_extensions = ERedExtension::iter()
+            .map(|variant| variant.to_string())
+            .collect::<Vec<_>>();
+        included_extensions.push(String::from("bin"));
+
+        // get only resource files
+        let allfiles = WalkDir::new(infolder)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|p| {
+                included_extensions
+                    .contains(&p.path().extension().unwrap().to_str().unwrap().to_owned())
+            })
+            .map(|f| f.into_path())
+            .collect::<Vec<_>>();
+
+        // sort by hash
+        // TODO
+        let mut resource_paths = allfiles
+            .iter()
+            .map(|f| {
+                let relative_path = f.strip_prefix(infolder).unwrap_or(f);
+                let hash = fnv1a64_hash_string(&relative_path.to_str().unwrap().to_owned());
+                (f.clone(), hash)
+            })
+            .collect::<Vec<_>>();
+        resource_paths.sort_by_key(|k| k.1);
+
+        let outfile = outpath.join(archive_name);
+        let mut fs = File::create(outfile).unwrap();
+        let mut bw = BufWriter::new(&mut fs);
+
+        // write temp header
+        let archive = Archive::default();
+        let header = Header::default();
+        header.serialize(&mut bw)?;
+        bw.write_all(&[0u8; 132]).unwrap(); // some weird padding
+
+        // write custom data
+        // TODO
+        // let custom_data_length = if !custom_paths.is_empty() {
+        //     let wfooter = LxrsFooter::new(&custom_paths);
+        //     wfooter.write(&mut bw).unwrap();
+        //     bw.seek(SeekFrom::Start(Header::EXTENDED_SIZE as u64))
+        //         .unwrap();
+        //     bw.stream_position().unwrap() as u32
+        // } else {
+        //     0
+        // };
+
+        // write files
+        let mut imports_hash_set: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for (path, hash) in resource_paths {
+            // TODO custom paths
+
+            // read file
+            let mut file = File::open(path)?;
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer)?;
+
+            let firstimportidx = imports_hash_set.len();
+            let lastimportidx = imports_hash_set.len();
+            let firstoffsetidx = archive.index.file_segments.len();
+            let lastoffsetidx = 0;
+            let flags = 0;
+        }
+
+        Ok(())
+    }
 }
 
 //static HEADER_MAGIC: u32 = 1380009042;
@@ -102,8 +208,22 @@ pub struct Header {
     pub filesize: u64,
 }
 
+impl Default for Header {
+    fn default() -> Self {
+        Self {
+            magic: 1380009042,
+            version: 12,
+            index_position: Default::default(),
+            index_size: Default::default(),
+            debug_position: Default::default(),
+            debug_size: Default::default(),
+            filesize: Default::default(),
+        }
+    }
+}
+
 impl Header {
-    fn from_reader(cursor: &mut Cursor<&Vec<u8>>) -> io::Result<Self> {
+    fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self> {
         let header = Header {
             magic: cursor.read_u32::<LittleEndian>()?,
             version: cursor.read_u32::<LittleEndian>()?,
@@ -116,9 +236,21 @@ impl Header {
 
         Ok(header)
     }
+
+    fn serialize<W: Write>(&self, cursor: &mut W) -> io::Result<()> {
+        cursor.write_u32::<LittleEndian>(self.magic)?;
+        cursor.write_u32::<LittleEndian>(self.version)?;
+        cursor.write_u64::<LittleEndian>(self.index_position)?;
+        cursor.write_u32::<LittleEndian>(self.index_size)?;
+        cursor.write_u64::<LittleEndian>(self.debug_position)?;
+        cursor.write_u32::<LittleEndian>(self.debug_size)?;
+        cursor.write_u64::<LittleEndian>(self.filesize)?;
+
+        Ok(())
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Index {
     pub file_table_offset: u32,
     pub file_table_size: u32,
@@ -126,13 +258,15 @@ pub struct Index {
     pub file_entry_count: u32,
     pub file_segment_count: u32,
     pub resource_dependency_count: u32,
+
+    // not serialized
     // pub dependencies: Vec<Dependency>,
     pub file_entries: HashMap<u64, FileEntry>,
-    // pub file_segments: Vec<FileSegment>,
+    pub file_segments: Vec<FileSegment>,
 }
 
 impl Index {
-    fn from_reader(cursor: &mut Cursor<&Vec<u8>>) -> io::Result<Self> {
+    fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self> {
         let mut index = Index {
             file_table_offset: cursor.read_u32::<LittleEndian>()?,
             file_table_size: cursor.read_u32::<LittleEndian>()?,
@@ -140,7 +274,9 @@ impl Index {
             file_entry_count: cursor.read_u32::<LittleEndian>()?,
             file_segment_count: cursor.read_u32::<LittleEndian>()?,
             resource_dependency_count: cursor.read_u32::<LittleEndian>()?,
+
             file_entries: HashMap::default(),
+            file_segments: vec![],
         };
 
         // read files
@@ -175,7 +311,7 @@ pub struct FileEntry {
 }
 
 impl FileEntry {
-    fn from_reader(cursor: &mut Cursor<&Vec<u8>>) -> io::Result<Self> {
+    fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self> {
         let mut entry = FileEntry {
             name_hash_64: cursor.read_u64::<LittleEndian>()?,
             timestamp: cursor.read_u64::<LittleEndian>()?,
@@ -207,7 +343,7 @@ impl LxrsFooter {
     //const MINLEN: u32 = 20;
     const MAGIC: u32 = 0x4C585253;
 
-    fn from_reader(cursor: &mut Cursor<&Vec<u8>>) -> io::Result<Self> {
+    fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self> {
         let magic = cursor.read_u32::<LittleEndian>()?;
         if magic != LxrsFooter::MAGIC {
             return Err(io::Error::new(io::ErrorKind::Other, "invalid magic"));
@@ -270,16 +406,232 @@ impl LxrsFooter {
     }
 }
 
+#[allow(non_camel_case_types)]
+#[derive(Debug, EnumIter, Display)]
+enum ERedExtension {
+    unknown,
+
+    acousticdata,
+    actionanimdb,
+    aiarch,
+    animgraph,
+    anims,
+    app,
+    archetypes,
+    areas,
+    audio_metadata,
+    audiovehcurveset,
+    behavior,
+    bikecurveset,
+    bk2,
+    bnk,
+    camcurveset,
+    ccstate,
+    cfoliage,
+    charcustpreset,
+    chromaset,
+    cminimap,
+    community,
+    conversations,
+    cooked_mlsetup,
+    cookedanims,
+    cookedapp,
+    cookedprefab,
+    credits,
+    csv,
+    cubemap,
+    curveresset,
+    curveset,
+    dat,
+    devices,
+    dlc_manifest,
+    dtex,
+    effect,
+    ent,
+    env,
+    envparam,
+    envprobe,
+    es,
+    facialcustom,
+    facialsetup,
+    fb2tl,
+    fnt,
+    folbrush,
+    foldest,
+    fp,
+    game,
+    gamedef,
+    garmentlayerparams,
+    genericanimdb,
+    geometry_cache,
+    gidata,
+    gradient,
+    hitrepresentation,
+    hp,
+    ies,
+    inkanim,
+    inkatlas,
+    inkcharcustomization,
+    inkenginesettings,
+    inkfontfamily,
+    inkfullscreencomposition,
+    inkgamesettings,
+    inkhud,
+    inklayers,
+    inkmenu,
+    inkshapecollection,
+    inkstyle,
+    inktypography,
+    inkwidget,
+    interaction,
+    journal,
+    journaldesc,
+    json,
+    lane_connections,
+    lane_polygons,
+    lane_spots,
+    lights,
+    lipmap,
+    location,
+    locopaths,
+    loot,
+    mappins,
+    matlib,
+    mesh,
+    mi,
+    mlmask,
+    mlsetup,
+    mltemplate,
+    morphtarget,
+    mt,
+    null_areas,
+    opusinfo,
+    opuspak,
+    particle,
+    phys,
+    physicalscene,
+    physmatlib,
+    poimappins,
+    psrep,
+    quest,
+    questphase,
+    redphysics,
+    regionset,
+    remt,
+    reps,
+    reslist,
+    rig,
+    scene,
+    scenerid,
+    scenesversions,
+    smartobject,
+    smartobjects,
+    sp,
+    spatial_representation,
+    streamingblock,
+    streamingquerydata,
+    streamingsector,
+    streamingsector_inplace,
+    streamingworld,
+    terrainsetup,
+    texarray,
+    traffic_collisions,
+    traffic_persistent,
+    vehcommoncurveset,
+    vehcurveset,
+    voicetags,
+    w2mesh,
+    w2mi,
+    wem,
+    workspot,
+    worldlist,
+    xbm,
+    xcube,
+
+    wdyn,
+}
+#[warn(non_camel_case_types)]
+#[derive(Debug, Clone, Copy)]
+pub struct CR2WFileInfo {
+    pub header: CR2WFileHeader,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CR2WFileHeader {
+    pub version: u32,
+    pub flags: u32,
+    pub timeStamp: u64,
+    pub buildVersion: u32,
+    pub objectsEnd: u32,
+    pub buffersEnd: u32,
+    pub crc32: u32,
+    pub numChunks: u32,
+}
+impl CR2WFileHeader {
+    const MAGIC: u32 = 0x57325243;
+
+    fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self> {
+        Ok(CR2WFileHeader {
+            version: cursor.read_u32::<LittleEndian>()?,
+            flags: cursor.read_u32::<LittleEndian>()?,
+            timeStamp: cursor.read_u64::<LittleEndian>()?,
+            buildVersion: cursor.read_u32::<LittleEndian>()?,
+            objectsEnd: cursor.read_u32::<LittleEndian>()?,
+            buffersEnd: cursor.read_u32::<LittleEndian>()?,
+            crc32: cursor.read_u32::<LittleEndian>()?,
+            numChunks: cursor.read_u32::<LittleEndian>()?,
+        })
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct CR2WTable {
+    pub offset: u32,
+    pub itemCount: u32,
+    pub crc32: u32,
+}
+
+impl CR2WTable {
+    fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self> {
+        Ok(CR2WTable {
+            offset: cursor.read_u32::<LittleEndian>()?,
+            itemCount: cursor.read_u32::<LittleEndian>()?,
+            crc32: cursor.read_u32::<LittleEndian>()?,
+        })
+    }
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////
 /// READERS
 /////////////////////////////////////////////////////////////////////////////////////////
+
+fn read_cr2w_header<R: Read>(cursor: &mut R) -> io::Result<CR2WFileInfo> {
+    let magic = cursor.read_u32::<LittleEndian>()?;
+    if magic != CR2WFileHeader::MAGIC {
+        return Err(io::Error::new(io::ErrorKind::Other, "invalid magic"));
+    }
+
+    let header = CR2WFileHeader::from_reader(cursor)?;
+    let mut headers: Vec<CR2WTable> = vec![];
+    // Tables [7-9] are not used in cr2w so far.
+    for i in 0..10 {
+        headers[i] = CR2WTable::from_reader(cursor)?;
+    }
+
+    // read strings - block 1 (index 0)
+
+    // read the other tables
+
+    let info = CR2WFileInfo { header };
+    Ok(info)
+}
 
 /// Read a null_terminated_string from cursor
 ///
 /// # Errors
 ///
 /// This function will return an error if from_utf8_lossy fails
-fn read_null_terminated_string<R>(reader: &mut R) -> io::Result<String>
+fn read_null_terminated_string<R: Read>(reader: &mut R) -> io::Result<String>
 where
     R: Read,
 {
