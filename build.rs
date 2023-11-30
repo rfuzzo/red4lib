@@ -3,31 +3,43 @@ use std::{fs::File, path::PathBuf};
 
 // print build script logs
 macro_rules! p {
-    ($($tokens: tt)*) => {
-        println!("cargo:warning={}", format!($($tokens)*))
-    }
+  ($($tokens: tt)*) => {
+      println!("cargo:warning={}", format!($($tokens)*))
+  }
 }
 
+const LIB_NAME: &str = "kraken";
+const TARGET_NAME: &str = "kraken_static";
+
 fn main() {
-    let mut cfg = Config::new("kraken");
+    // cmake config
+    let mut cfg = Config::new(LIB_NAME);
     //cfg.profile("RelWithDebInfo");
     //cfg.profile("Debug");
-    let cp = cfg.get_profile().to_owned();
-    p!("CMAKE_PROFILE : {}", cp);
-    let dst = cfg.build_target("kraken_static").build();
+    let dst = cfg.build_target(TARGET_NAME).build();
 
-    // info
-    let profile = std::env::var("PROFILE").unwrap();
-    p!("PROFILE : {}", profile);
+    // logging
+    let cmake_profile: String = cfg.get_profile().to_owned();
+    let rust_profile = std::env::var("PROFILE").unwrap();
+    p!("CMAKE_PROFILE : {}", cmake_profile);
+    p!("RUST_PROFILE : {}", rust_profile);
     p!("DST: {}", dst.display());
 
     // link
+    let mut link_path = format!("{}/build/bin/CMake", dst.display());
+    let mut additional_args = "".to_owned();
+    if cfg!(windows) {
+        link_path = format!("{}/{}", link_path, cmake_profile);
+    } else if cfg!(unix) {
+        additional_args = "-l".to_owned();
+    }
+
+    // link rustc
+    println!("cargo:rustc-link-search=native={}", link_path);
     println!(
-        "cargo:rustc-link-search=native={}/build/bin/CMake/{}",
-        dst.display(),
-        cp
+        "cargo:rustc-link-lib{}=static={}",
+        additional_args, LIB_NAME
     );
-    println!("cargo:rustc-link-lib=static=kraken_static");
 
     // extract resources
     let file_path = PathBuf::from("src/metadata-resources.csv");
