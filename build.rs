@@ -38,7 +38,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", link_path);
     println!(
         "cargo:rustc-link-lib{}=static={}",
-        additional_args, LIB_NAME
+        additional_args, TARGET_NAME
     );
 
     // extract resources
