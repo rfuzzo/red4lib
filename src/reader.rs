@@ -3,9 +3,8 @@
 /////////////////////////////////////////////////////////////////////////////////////////
 use std::io::{self, Read};
 
-// TODO make this into a macro
 pub trait FromReader: Sized {
-    fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self>;
+    fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self>;
 }
 
 /// Read a null_terminated_string from cursor

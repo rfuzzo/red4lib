@@ -1,2 +1,4 @@
 /target
+/tests/out
 src/metadata-resources.csv
+.DS_Store

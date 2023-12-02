@@ -5,17 +5,31 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::reader::{read_null_terminated_string, FromReader};
 
+// DTOs
+
+#[derive(Debug, Clone)]
+pub struct Import {
+    pub class_name: String,
+    pub depot_path: String,
+    pub flags: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct CR2WFileInfo {
     pub header: CR2WFileHeader,
-    pub strings: HashMap<u32, String>,
     pub names_table: Vec<CR2WNameInfo>,
     pub imports_table: Vec<CR2WImportInfo>,
     pub properties_table: Vec<CR2WPropertyInfo>,
     pub exports_table: Vec<CR2WExportInfo>,
     pub buffers_table: Vec<CR2WBufferInfo>,
     pub embeds_table: Vec<CR2WEmbeddedInfo>,
+    // not-serialized
+    pub strings: HashMap<u32, String>,
+    pub names: Vec<String>,
+    pub imports: Vec<Import>,
 }
+
+// Real red4 data
 
 #[derive(Debug, Clone, Copy)]
 pub struct CR2WFileHeader {
@@ -212,7 +226,7 @@ fn read_table<R: Read + Seek, T: FromReader>(
     table: CR2WTable,
 ) -> io::Result<Vec<T>> {
     let mut result_table: Vec<T> = vec![];
-    for i in 0..table.item_count {
+    for _i in 0..table.item_count {
         result_table.push(T::from_reader(reader)?);
     }
     Ok(result_table)
@@ -247,15 +261,37 @@ pub fn read_cr2w_header<R: Read + Seek>(cursor: &mut R) -> io::Result<CR2WFileIn
     let buffers_table = read_table::<R, CR2WBufferInfo>(cursor, tables[3])?;
     let embeds_table = read_table::<R, CR2WEmbeddedInfo>(cursor, tables[3])?;
 
+    // hacks: parse specific
+    // parse names
+    let names = names_table
+        .iter()
+        .map(|f| strings.get(&f.offset).unwrap().to_owned())
+        .collect::<Vec<_>>();
+
+    // parse imports
+    let mut imports: Vec<Import> = vec![];
+    for info in imports_table.iter() {
+        let class_name = names.get(info.class_name as usize).unwrap().to_owned();
+        let depot_path = strings.get(&info.offset).unwrap().to_owned();
+        let flags = info.flags;
+        imports.push(Import {
+            class_name,
+            depot_path,
+            flags,
+        });
+    }
+
     let info = CR2WFileInfo {
         header,
-        strings,
         names_table,
         imports_table,
         properties_table,
         exports_table,
         buffers_table,
         embeds_table,
+        strings,
+        imports,
+        names,
     };
     Ok(info)
 }
