@@ -3,7 +3,7 @@ use std::io::{self, Read, Seek};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::reader::{read_null_terminated_string, FromReader};
+use crate::io::{read_null_terminated_string, FromReader};
 
 // DTOs
 
@@ -257,28 +257,37 @@ pub fn read_cr2w_header<R: Read + Seek>(cursor: &mut R) -> io::Result<CR2WFileIn
     let names_table = read_table::<R, CR2WNameInfo>(cursor, tables[1])?;
     let imports_table = read_table::<R, CR2WImportInfo>(cursor, tables[2])?;
     let properties_table = read_table::<R, CR2WPropertyInfo>(cursor, tables[3])?;
-    let exports_table = read_table::<R, CR2WExportInfo>(cursor, tables[3])?;
-    let buffers_table = read_table::<R, CR2WBufferInfo>(cursor, tables[3])?;
-    let embeds_table = read_table::<R, CR2WEmbeddedInfo>(cursor, tables[3])?;
+    let exports_table = read_table::<R, CR2WExportInfo>(cursor, tables[4])?;
+    let buffers_table = read_table::<R, CR2WBufferInfo>(cursor, tables[5])?;
+    let embeds_table = read_table::<R, CR2WEmbeddedInfo>(cursor, tables[6])?;
+
+    // Tables [7-9] are not used in cr2w so far.
 
     // hacks: parse specific
     // parse names
     let names = names_table
         .iter()
-        .map(|f| strings.get(&f.offset).unwrap().to_owned())
+        .map(|f| {
+            if let Some(s) = strings.get(&f.offset) {
+                return s.to_owned();
+            }
+            "".to_owned()
+        })
         .collect::<Vec<_>>();
 
     // parse imports
     let mut imports: Vec<Import> = vec![];
     for info in imports_table.iter() {
-        let class_name = names.get(info.class_name as usize).unwrap().to_owned();
-        let depot_path = strings.get(&info.offset).unwrap().to_owned();
-        let flags = info.flags;
-        imports.push(Import {
-            class_name,
-            depot_path,
-            flags,
-        });
+        if let Some(class_name) = names.get(info.class_name as usize) {
+            if let Some(depot_path) = strings.get(&info.offset) {
+                let flags = info.flags;
+                imports.push(Import {
+                    class_name: class_name.to_owned(),
+                    depot_path: depot_path.to_owned(),
+                    flags,
+                });
+            }
+        }
     }
 
     let info = CR2WFileInfo {

@@ -14,11 +14,11 @@ use strum::IntoEnumIterator;
 use walkdir::WalkDir;
 
 use crate::cr2w::read_cr2w_header;
+use crate::io::{read_null_terminated_string, write_null_terminated_string, FromReader};
 use crate::kraken::{
     self, compress, decompress, get_compressed_buffer_size_needed, CompressionLevel,
 };
-use crate::reader::{read_null_terminated_string, FromReader};
-use crate::{fnv1a64_hash_string, get_red4_hashes, ERedExtension};
+use crate::{fnv1a64_hash_string, ERedExtension};
 
 #[derive(Debug, Clone, Default)]
 pub struct Archive {
@@ -114,7 +114,7 @@ impl Default for Header {
 }
 
 impl FromReader for Header {
-    fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
+    fn from_reader<R: Read>(reader: &mut R) -> Result<Self> {
         Ok(Header {
             magic: reader.read_u32::<LittleEndian>()?,
             version: reader.read_u32::<LittleEndian>()?,
@@ -127,7 +127,7 @@ impl FromReader for Header {
     }
 }
 impl Header {
-    pub fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<LittleEndian>(self.magic)?;
         writer.write_u32::<LittleEndian>(self.version)?;
         writer.write_u64::<LittleEndian>(self.index_position)?;
@@ -155,7 +155,7 @@ pub struct Index {
     pub dependencies: Vec<Dependency>,
 }
 impl Index {
-    pub fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<LittleEndian>(self.file_table_offset)?;
         writer.write_u32::<LittleEndian>(self.file_table_size)?;
         writer.write_u64::<LittleEndian>(self.crc)?;
@@ -270,6 +270,31 @@ pub struct LxrsFooter {
 impl LxrsFooter {
     //const MINLEN: u32 = 20;
     const MAGIC: u32 = 0x4C585253;
+    const VERSION: u32 = 1;
+
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_u32::<LittleEndian>(self.files.len() as u32)?;
+        writer.write_u32::<LittleEndian>(LxrsFooter::VERSION)?;
+
+        // write strings to buffer
+        let mut buffer: Vec<u8> = Vec::new();
+        for f in &self.files {
+            write_null_terminated_string(&mut buffer, f.to_owned())?;
+        }
+
+        // compress
+        let size = buffer.len();
+        let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
+        let mut compressed_buffer = vec![0; compressed_size_needed as usize];
+        let zsize = compress(&buffer, &mut compressed_buffer, CompressionLevel::Normal);
+        assert!((zsize as u32) <= size as u32);
+        compressed_buffer.resize(zsize as usize, 0);
+
+        // write to writer
+        writer.write_all(&compressed_buffer)?;
+
+        Ok(())
+    }
 }
 impl FromReader for LxrsFooter {
     fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
@@ -288,11 +313,9 @@ impl FromReader for LxrsFooter {
                 // buffer is compressed
                 let mut compressed_buffer = vec![0; zsize as usize];
                 reader.read_exact(&mut compressed_buffer[..])?;
-                // TODO we allocate more here, why?
-                let output_buffer_len = size as usize * 2;
-                let mut output_buffer = vec![0; output_buffer_len];
-                let _result = decompress(compressed_buffer, &mut output_buffer);
-                output_buffer.resize(size as usize, 0);
+                let mut output_buffer = vec![0; size as usize];
+                let result = decompress(compressed_buffer, &mut output_buffer);
+                assert_eq!(result as u32, size);
 
                 // read from buffer
                 let mut inner_cursor = io::Cursor::new(&output_buffer);
@@ -324,70 +347,12 @@ impl FromReader for LxrsFooter {
     }
 }
 
-/// Extracts all files from an archive and writes them to a folder
-///
-/// # Panics
-///
-/// Panics if file path operations fail
-///
-/// # Errors
-///
-/// This function will return an error if any parsing fails
-pub fn extract_archive(in_file: PathBuf, out_dir: PathBuf) -> io::Result<()> {
-    // TODO make this a singleton somehow?
-    let hash_map = get_red4_hashes();
-
-    // parse archive headers
-    let archive = Archive::from_file(&in_file)?;
-
-    let archive_file = File::open(in_file)?;
-    let mut archive_reader = io::BufReader::new(archive_file);
-
-    for (hash, file_entry) in archive.index.file_entries.iter() {
-        // get filename
-        let mut name_or_hash: String = format!("{}.bin", hash);
-        if let Some(name) = hash_map.get(hash) {
-            name_or_hash = name.to_owned();
-        }
-        if let Some(name) = archive.file_names.get(hash) {
-            name_or_hash = name.to_owned();
-        }
-
-        let outfile = out_dir.join(name_or_hash);
-        create_dir_all(outfile.parent().unwrap())?;
-
-        // extract to stream
-        let mut fs = File::create(outfile).unwrap();
-        let mut file_writer = BufWriter::new(&mut fs);
-        // decompress main file
-        let start_index = file_entry.segments_start;
-        let next_index = file_entry.segments_end;
-        if let Some(segment) = archive.index.file_segments.get(start_index as usize) {
-            // read and decompress from main archive stream
-
-            // kraken decompress
-            if segment.size == segment.z_size {
-                // just copy over
-                archive_reader.seek(SeekFrom::Start(segment.offset))?;
-                let mut buffer = vec![0; segment.z_size as usize];
-                archive_reader.read_exact(&mut buffer[..])?;
-                file_writer.write_all(&buffer)?;
-            } else {
-                decompress_segment(&mut archive_reader, segment, &mut file_writer)?;
-            }
-        }
-
-        // extract additional buffers
-        for i in start_index..next_index {
-            if let Some(segment) = archive.index.file_segments.get(i as usize) {
-                // do not decompress with oodle
-                archive_reader.seek(SeekFrom::Start(segment.offset))?;
-                let mut buffer = vec![0; segment.z_size as usize];
-                archive_reader.read_exact(&mut buffer[..])?;
-                file_writer.write_all(&buffer)?;
-            }
-        }
-    }
+fn pad_until_page<W: Write + Seek>(writer: &mut W) -> io::Result<()> {
+    let pos = writer.stream_position()?;
+    let modulo = pos / 4096;
+    let diff = ((modulo + 1) * 4096) - pos;
+    let padding = vec![0xD9; diff as usize];
+    writer.write_all(padding.as_slice())?;
 
     Ok(())
 }
@@ -414,10 +379,10 @@ fn decompress_segment<R: Read + Seek, W: Write>(
         }
         let mut compressed_buffer = vec![0; segment.z_size as usize - 8];
         archive_reader.read_exact(&mut compressed_buffer[..])?;
-        // TODO we allocate more here, why?
-        let mut output_buffer = vec![0; size as usize * 2];
-        let _result = decompress(compressed_buffer, &mut output_buffer);
-        output_buffer.resize(size as usize, 0);
+        let mut output_buffer = vec![0; size as usize];
+        let result = decompress(compressed_buffer, &mut output_buffer);
+        assert_eq!(result as u32, size);
+
         // write
         file_writer.write_all(&output_buffer)?;
     } else {
@@ -431,6 +396,80 @@ fn decompress_segment<R: Read + Seek, W: Write>(
     Ok(())
 }
 
+/////////////////////////////////////////////////////////////////////////////////////////
+/// Lib
+/////////////////////////////////////////////////////////////////////////////////////////
+
+/// Extracts all files from an archive and writes them to a folder
+///
+/// # Panics
+///
+/// Panics if file path operations fail
+///
+/// # Errors
+///
+/// This function will return an error if any parsing fails
+pub fn extract_archive(
+    in_file: &PathBuf,
+    out_dir: &Path,
+    hash_map: &HashMap<u64, String>,
+) -> io::Result<()> {
+    // parse archive headers
+    let archive = Archive::from_file(in_file)?;
+
+    let archive_file = File::open(in_file)?;
+    let mut archive_reader = io::BufReader::new(archive_file);
+
+    for (hash, file_entry) in archive.index.file_entries.iter() {
+        // get filename
+        let mut name_or_hash: String = format!("{}.bin", hash);
+        if let Some(name) = hash_map.get(hash) {
+            name_or_hash = name.to_owned();
+        }
+        if let Some(name) = archive.file_names.get(hash) {
+            name_or_hash = name.to_owned();
+        }
+
+        // name or hash is a relative path
+        let outfile = out_dir.join(name_or_hash);
+        create_dir_all(outfile.parent().expect("Could not create an out_dir"))?;
+
+        // extract to stream
+        let mut fs = File::create(outfile)?;
+        let mut file_writer = BufWriter::new(&mut fs);
+        // decompress main file
+        let start_index = file_entry.segments_start;
+        let next_index = file_entry.segments_end;
+        if let Some(segment) = archive.index.file_segments.get(start_index as usize) {
+            // read and decompress from main archive stream
+
+            // kraken decompress
+            if segment.size == segment.z_size {
+                // just copy over
+                archive_reader.seek(SeekFrom::Start(segment.offset))?;
+                let mut buffer = vec![0; segment.z_size as usize];
+                archive_reader.read_exact(&mut buffer[..])?;
+                file_writer.write_all(&buffer)?;
+            } else {
+                decompress_segment(&mut archive_reader, segment, &mut file_writer)?;
+            }
+        }
+
+        // extract additional buffers
+        for i in start_index + 1..next_index {
+            if let Some(segment) = archive.index.file_segments.get(i as usize) {
+                // do not decompress with oodle
+                archive_reader.seek(SeekFrom::Start(segment.offset))?;
+                let mut buffer = vec![0; segment.z_size as usize];
+                archive_reader.read_exact(&mut buffer[..])?;
+                file_writer.write_all(&buffer)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Packs redengine 4 resource file in a folder to an archive
 ///
 /// # Panics
@@ -440,22 +479,25 @@ fn decompress_segment<R: Read + Seek, W: Write>(
 /// # Errors
 ///
 /// This function will return an error if any parsing or IO fails
-pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> io::Result<()> {
-    if !infolder.exists() {
+pub fn write_archive(
+    in_folder: &Path,
+    out_folder: &Path,
+    modname: Option<&str>,
+    hash_map: HashMap<u64, String>,
+) -> io::Result<()> {
+    if !in_folder.exists() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, ""));
     }
 
-    if !outpath.exists() {
+    if !out_folder.exists() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, ""));
     }
 
     let archive_name = if let Some(name) = modname {
         format!("{}.archive", name)
     } else {
-        format!(
-            "{}.archive",
-            infolder.file_name().unwrap_or_default().to_string_lossy()
-        )
+        let folder_name = in_folder.file_name().expect("Could not get in_dir name");
+        format!("{}.archive", folder_name.to_string_lossy())
     };
 
     // collect files
@@ -465,55 +507,72 @@ pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> 
     included_extensions.push(String::from("bin"));
 
     // get only resource files
-    let allfiles = WalkDir::new(infolder)
+    let allfiles = WalkDir::new(in_folder)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|p| {
-            included_extensions
-                .contains(&p.path().extension().unwrap().to_str().unwrap().to_owned())
-        })
         .map(|f| f.into_path())
+        .filter(|p| {
+            if let Some(ext) = p.extension() {
+                if let Some(ext) = ext.to_str() {
+                    return included_extensions.contains(&ext.to_owned());
+                }
+            }
+            false
+        })
         .collect::<Vec<_>>();
 
     // sort by hash
-    let mut resource_paths = allfiles
+    let mut hashed_paths = allfiles
         .iter()
-        .map(|f| {
-            let relative_path = f.strip_prefix(infolder).unwrap_or(f);
-            let hash = fnv1a64_hash_string(&relative_path.to_str().unwrap().to_owned());
-            (f.clone(), hash)
+        .filter_map(|f| {
+            if let Ok(relative_path) = f.strip_prefix(in_folder) {
+                if let Some(path_str) = relative_path.to_str() {
+                    let hash = fnv1a64_hash_string(&path_str.to_string());
+                    return Some((f.clone(), hash));
+                }
+            }
+            None
         })
         .collect::<Vec<_>>();
-    resource_paths.sort_by_key(|k| k.1);
+    hashed_paths.sort_by_key(|k| k.1);
 
-    let outfile = outpath.join(archive_name);
-    let mut fs = File::create(outfile).unwrap();
+    let outfile = out_folder.join(archive_name);
+    let mut fs = File::create(outfile)?;
     let mut archive_writer = BufWriter::new(&mut fs);
 
     // write temp header
     let mut archive = Archive::default();
     let header = Header::default();
     header.serialize(&mut archive_writer)?;
-    archive_writer.write_all(&[0u8; 132]).unwrap(); // some weird padding
+    archive_writer.write_all(&[0u8; 132])?; // some weird padding
 
-    // TODO custom paths
-    // let custom_data_length = if !custom_paths.is_empty() {
-    //     let wfooter = LxrsFooter::new(&custom_paths);
-    //     wfooter.write(&mut bw).unwrap();
-    //     bw.seek(SeekFrom::Start(Header::EXTENDED_SIZE as u64))
-    //         .unwrap();
-    //     bw.stream_position().unwrap() as u32
-    // } else {
-    //     0
-    // };
+    // write custom header
+    assert_eq!(HEADER_EXTENDED_SIZE, archive_writer.stream_position()?);
+    let custom_paths = hashed_paths
+        .iter()
+        .filter(|(_p, k)| hash_map.contains_key(k))
+        .filter_map(|(f, _h)| {
+            if let Ok(path) = f.strip_prefix(in_folder) {
+                return Some(path.to_string_lossy().to_string());
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+
+    let mut custom_data_length = 0;
+    if !custom_paths.is_empty() {
+        let wfooter = LxrsFooter {
+            files: custom_paths,
+        };
+        wfooter.serialize(&mut archive_writer)?;
+        custom_data_length = archive_writer.stream_position()? - HEADER_EXTENDED_SIZE;
+    }
 
     // write files
     let mut imports_hash_set: HashSet<String> = HashSet::new();
-    for (path, hash) in resource_paths {
-        // TODO custom paths
-
+    for (path, hash) in hashed_paths {
         // read file
-        let mut file = File::open(path)?;
+        let mut file = File::open(&path)?;
         let mut file_buffer = Vec::new();
         file.read_to_end(&mut file_buffer)?;
 
@@ -523,8 +582,7 @@ pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> 
         let mut lastoffsetidx = 0;
         let mut flags = 0;
 
-        //TODO refactor this without cloning
-        let mut file_cursor = io::Cursor::new(file_buffer.clone());
+        let mut file_cursor = io::Cursor::new(&file_buffer);
         if let Ok(info) = read_cr2w_header(&mut file_cursor) {
             // get main file
             file_cursor.seek(SeekFrom::Start(0))?;
@@ -538,11 +596,11 @@ pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> 
             let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
             let mut compressed_buffer = vec![0; compressed_size_needed as usize];
             let zsize = compress(
-                resource_buffer,
+                &resource_buffer,
                 &mut compressed_buffer,
                 CompressionLevel::Normal,
             );
-            assert!((zsize as u32) < size);
+            assert!((zsize as u32) <= size);
             compressed_buffer.resize(zsize as usize, 0);
 
             // write compressed main file archive
@@ -578,7 +636,7 @@ pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> 
 
             //register imports
             for import in info.imports.iter() {
-                //TODO fix flags
+                // TODO fix flags
                 // if (cr2WImportWrapper.Flags is not InternalEnums.EImportFlags.Soft and not InternalEnums.EImportFlags.Embedded)
                 imports_hash_set.insert(import.depot_path.to_owned());
             }
@@ -591,8 +649,43 @@ pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> 
                 0
             };
         } else {
-            // TODO write non-cr2w file
-            !todo!();
+            // write non-cr2w file
+            file_cursor.seek(SeekFrom::Start(0))?;
+            if let Some(os_ext) = path.extension() {
+                let ext = os_ext.to_ascii_lowercase().to_string_lossy().to_string();
+                if get_aligned_file_extensions().contains(&ext) {
+                    pad_until_page(&mut archive_writer)?;
+                }
+
+                let offset = archive_writer.stream_position()?;
+                let size = file_buffer.len() as u32;
+                let mut final_zsize = file_buffer.len() as u32;
+                if get_uncompressed_file_extensions().contains(&ext) {
+                    // direct copy
+                    archive_writer.write_all(&file_buffer)?;
+                } else {
+                    // kark file
+                    let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
+                    let mut compressed_buffer = vec![0; compressed_size_needed as usize];
+                    let zsize = compress(
+                        &file_buffer,
+                        &mut compressed_buffer,
+                        CompressionLevel::Normal,
+                    );
+                    assert!((zsize as u32) <= size);
+                    compressed_buffer.resize(zsize as usize, 0);
+                    final_zsize = zsize as u32;
+                    // write
+                    archive_writer.write_all(&compressed_buffer)?;
+                }
+
+                // add metadata to archive
+                archive.index.file_segments.push(FileSegment {
+                    offset,
+                    size,
+                    z_size: final_zsize,
+                });
+            }
         }
 
         // update archive metadata
@@ -602,7 +695,7 @@ pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> 
 
         let entry = FileEntry {
             name_hash_64: hash,
-            timestamp: 0, //TODO proper timestamps
+            timestamp: 0, // TODO proper timestamps
             num_inline_buffer_segments: flags as u32,
             segments_start: firstoffsetidx as u32,
             segments_end: lastoffsetidx as u32,
@@ -632,17 +725,27 @@ pub fn write_archive(infolder: &Path, outpath: &Path, modname: Option<&str>) -> 
     archive.header.filesize = filesize;
     archive_writer.seek(SeekFrom::Start(0))?;
     archive.header.serialize(&mut archive_writer)?;
-    //archive_writer.write_u32::<LittleEndian>(custom_data_length);
+    archive_writer.write_u32::<LittleEndian>(custom_data_length as u32)?;
 
     Ok(())
 }
 
-fn pad_until_page<W: Write + Seek>(writer: &mut W) -> io::Result<()> {
-    let pos = writer.stream_position()?;
-    let modulo = pos / 4096;
-    let diff = ((modulo + 1) * 4096) - pos;
-    let padding = vec![0xD9; diff as usize];
-    writer.write_all(padding.as_slice())?;
+/// .
+fn get_aligned_file_extensions() -> Vec<String> {
+    let files = vec![".bk2", ".bnk", ".opusinfo", ".wem", ".bin"];
+    files.into_iter().map(|f| f.to_owned()).collect::<Vec<_>>()
+}
 
-    Ok(())
+/// .
+fn get_uncompressed_file_extensions() -> Vec<String> {
+    let files = vec![
+        ".bk2",
+        ".bnk",
+        ".opusinfo",
+        ".wem",
+        ".bin",
+        ".dat",
+        ".opuspak",
+    ];
+    files.into_iter().map(|f| f.to_owned()).collect::<Vec<_>>()
 }

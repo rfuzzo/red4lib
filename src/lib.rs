@@ -2,8 +2,8 @@
 
 pub mod archive;
 pub mod cr2w;
+pub mod io;
 pub mod kraken;
-pub mod reader;
 
 use std::collections::HashMap;
 use std::fs::{self};

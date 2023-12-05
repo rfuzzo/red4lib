@@ -1,4 +1,12 @@
+# rust
 /target
-/tests/out
+
+# tests
+/tests/out*
 src/metadata-resources.csv
+
+# macos
 .DS_Store
+
+# rider
+.idea/
