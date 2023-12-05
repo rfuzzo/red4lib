@@ -10,6 +10,7 @@ use std::fs::{self};
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
+use sha1::{Digest, Sha1};
 use strum_macros::{Display, EnumIter};
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -202,6 +203,13 @@ pub fn fnv1a64_hash_path(path: &Path) -> u64 {
     let mut hasher = fnv::FnvHasher::default();
     hasher.write(path_string.as_bytes());
     hasher.finish()
+}
+
+pub fn sha1_hash_file(file_buffer: &Vec<u8>) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    hasher.update(file_buffer);
+    let result = hasher.finalize();
+    result.into()
 }
 
 /// Get vanilla resource path hashes https://www.cyberpunk.net/en/modding-support

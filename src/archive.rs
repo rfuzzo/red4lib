@@ -9,7 +9,6 @@ use std::mem;
 use std::path::{Path, PathBuf};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 use walkdir::WalkDir;
 
@@ -18,7 +17,7 @@ use crate::io::{read_null_terminated_string, write_null_terminated_string, FromR
 use crate::kraken::{
     self, compress, decompress, get_compressed_buffer_size_needed, CompressionLevel,
 };
-use crate::{fnv1a64_hash_string, ERedExtension};
+use crate::{fnv1a64_hash_string, sha1_hash_file, ERedExtension};
 
 #[derive(Debug, Clone, Default)]
 pub struct Archive {
@@ -689,9 +688,7 @@ pub fn write_archive(
         }
 
         // update archive metadata
-        let mut hasher = Sha1::new();
-        hasher.update(file_buffer);
-        let result = hasher.finalize();
+        let sha1_hash = sha1_hash_file(&file_buffer);
 
         let entry = FileEntry {
             name_hash_64: hash,
@@ -701,7 +698,7 @@ pub fn write_archive(
             segments_end: lastoffsetidx as u32,
             resource_dependencies_start: firstimportidx as u32,
             resource_dependencies_end: lastimportidx as u32,
-            sha1_hash: result.into(),
+            sha1_hash,
         };
         archive.index.file_entries.insert(hash, entry);
     }

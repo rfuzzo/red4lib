@@ -9,36 +9,11 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use red4lib::archive::write_archive;
+    use red4lib::sha1_hash_file;
     use red4lib::{
         archive::{extract_archive, Archive},
         get_red4_hashes,
     };
-
-    fn get_files_in_folder_recursive<P: AsRef<Path>>(folder_path: &P) -> Vec<PathBuf> {
-        // Read the directory
-        if let Ok(entries) = fs::read_dir(folder_path) {
-            let mut files = Vec::new();
-
-            // Iterate over directory entries
-            for entry in entries.flatten() {
-                let path = entry.path();
-
-                // Check if the entry is a file
-                if path.is_file() {
-                    files.push(path.to_path_buf());
-                } else if path.is_dir() {
-                    // Recursively get files in subdirectories
-                    let subfolder_files = get_files_in_folder_recursive(&path);
-                    files.extend(subfolder_files);
-                }
-            }
-
-            return files;
-        }
-
-        // Return an empty vector if there's an error
-        Vec::new()
-    }
 
     #[test]
     fn read_archive() {
@@ -111,16 +86,7 @@ mod tests {
 
         for (i, e) in expected_files.into_iter().enumerate() {
             let f = found_files.get(i).unwrap();
-            // compare bytes
-            let mut fe = fs::File::open(&e).expect("Could not open file");
-            let mut fe_buffer = Vec::new();
-            std::io::Read::read_to_end(&mut fe, &mut fe_buffer).expect("Could not open file");
-
-            let mut ff = fs::File::open(f).expect("Could not open file");
-            let mut ff_buffer = Vec::new();
-            std::io::Read::read_to_end(&mut ff, &mut ff_buffer).expect("Could not open file");
-
-            assert_eq!(fe_buffer, ff_buffer);
+            assert_binary_equality(&e, f);
         }
 
         // cleanup
@@ -146,14 +112,62 @@ mod tests {
         assert!(result.is_ok());
 
         // checks
-        let expected_path = dst_path.join("data.archive");
-        assert!(expected_path.exists());
+        let created_path = dst_path.join("data.archive");
+        assert!(created_path.exists());
 
         // TODO binary equality
+        // let existing_path = PathBuf::from("tests").join("test1.archive");
+        // assert_binary_equality(&existing_path, &created_path);
 
         // cleanup
         if dst_path.exists() {
             assert!(fs::remove_dir_all(&dst_path).is_ok());
         }
+    }
+
+    /////////////////////////////////////////////////////////////////////////////////////////
+    /// HELPERS
+    /////////////////////////////////////////////////////////////////////////////////////////
+
+    fn assert_binary_equality(e: &PathBuf, f: &PathBuf) {
+        // compare bytes
+        let mut fe = fs::File::open(e).expect("Could not open file");
+        let mut fe_buffer = Vec::new();
+        std::io::Read::read_to_end(&mut fe, &mut fe_buffer).expect("Could not open file");
+        let fe_hash = format!("{:02X?}", sha1_hash_file(&fe_buffer));
+
+        let mut ff = fs::File::open(f).expect("Could not open file");
+        let mut ff_buffer = Vec::new();
+        std::io::Read::read_to_end(&mut ff, &mut ff_buffer).expect("Could not open file");
+        let ff_hash = format!("{:02X?}", sha1_hash_file(&ff_buffer));
+
+        // hash for nicer error msg
+        assert_eq!(fe_hash, ff_hash);
+    }
+
+    fn get_files_in_folder_recursive<P: AsRef<Path>>(folder_path: &P) -> Vec<PathBuf> {
+        // Read the directory
+        if let Ok(entries) = fs::read_dir(folder_path) {
+            let mut files = Vec::new();
+
+            // Iterate over directory entries
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Check if the entry is a file
+                if path.is_file() {
+                    files.push(path.to_path_buf());
+                } else if path.is_dir() {
+                    // Recursively get files in subdirectories
+                    let subfolder_files = get_files_in_folder_recursive(&path);
+                    files.extend(subfolder_files);
+                }
+            }
+
+            return files;
+        }
+
+        // Return an empty vector if there's an error
+        Vec::new()
     }
 }
