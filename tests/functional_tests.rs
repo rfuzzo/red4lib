@@ -6,6 +6,7 @@
 mod tests {
     use std::fs::create_dir_all;
     use std::path::Path;
+    use std::time::Instant;
     use std::{fs, path::PathBuf};
 
     use red4lib::archive::write_archive;
@@ -14,6 +15,16 @@ mod tests {
         archive::{extract_archive, Archive},
         get_red4_hashes,
     };
+
+    #[test]
+    fn time_csv() {
+        let start = Instant::now();
+        let hashes = get_red4_hashes();
+        assert!(!hashes.is_empty());
+        let end = Instant::now();
+        let duration = end - start;
+        println!("Execution time csv: {:?}", duration);
+    }
 
     #[test]
     fn read_archive() {

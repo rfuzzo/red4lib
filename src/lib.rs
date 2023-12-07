@@ -215,33 +215,21 @@ pub fn sha1_hash_file(file_buffer: &Vec<u8>) -> [u8; 20] {
 /// Get vanilla resource path hashes https://www.cyberpunk.net/en/modding-support
 pub fn get_red4_hashes() -> HashMap<u64, String> {
     let csv_data = include_bytes!("metadata-resources.csv");
-    parse_csv_data(csv_data)
-}
+    let mut map: HashMap<u64, String> = HashMap::new();
 
-/// Reads the metadata-resources.csv (csv of hashes and strings) from https://www.cyberpunk.net/en/modding-support
-fn parse_csv_data(csv_data: &[u8]) -> HashMap<u64, String> {
-    let mut reader = csv::ReaderBuilder::new().from_reader(csv_data);
-    let mut csv_map: HashMap<u64, String> = HashMap::new();
-
-    for result in reader.records() {
-        match result {
-            Ok(record) => {
-                // Assuming the CSV has two columns: String and u64
-                if let (Some(path), Some(hash_str)) = (record.get(0), record.get(1)) {
-                    if let Ok(hash) = hash_str.parse::<u64>() {
-                        csv_map.insert(hash, path.to_string());
-                    } else {
-                        eprintln!("Error parsing u64 value: {}", hash_str);
-                    }
-                } else {
-                    eprintln!("Malformed CSV record: {:?}", record);
+    let reader = std::io::BufReader::new(&csv_data[..]);
+    for line in std::io::BufRead::lines(reader).flatten() {
+        let mut split = line.split(',');
+        if let Some(name) = split.next() {
+            if let Some(hash_str) = split.next() {
+                if let Ok(hash) = hash_str.parse::<u64>() {
+                    map.insert(hash, name.to_owned());
                 }
             }
-            Err(err) => eprintln!("Error reading CSV record: {}", err),
         }
     }
 
-    csv_map
+    map
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
