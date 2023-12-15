@@ -34,6 +34,13 @@ mod tests {
     }
 
     #[test]
+    fn read_archive2() {
+        let archive_path = PathBuf::from("tests").join("nci.archive");
+        let result = Archive::from_file(&archive_path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn read_custom_data() {
         let archive_path = PathBuf::from("tests").join("test1.archive");
         let archive = Archive::from_file(&archive_path).expect("Could not parse archive");
