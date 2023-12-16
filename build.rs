@@ -1,5 +1,5 @@
 use cmake::Config;
-use std::{fs::File, path::PathBuf};
+use std::{env, fs::File, path::PathBuf};
 
 // print build script logs
 macro_rules! p {
@@ -12,34 +12,43 @@ const LIB_NAME: &str = "kraken";
 const TARGET_NAME: &str = "kraken_static";
 
 fn main() {
-    // cmake config
-    let mut cfg = Config::new(LIB_NAME);
-    //cfg.profile("RelWithDebInfo");
-    //cfg.profile("Debug");
-    let dst = cfg.build_target(TARGET_NAME).build();
+    let os = env::consts::OS;
 
-    // logging
-    let cmake_profile: String = cfg.get_profile().to_owned();
-    let rust_profile = std::env::var("PROFILE").unwrap();
-    p!("CMAKE_PROFILE : {}", cmake_profile);
-    p!("RUST_PROFILE : {}", rust_profile);
-    p!("DST: {}", dst.display());
+    if os == "linux" {
+        let link_path = std::env::current_dir().unwrap().join("lib").join(os);
+        // link rustc
+        println!("cargo:rustc-link-search=native={}", link_path.display());
+        println!("cargo:rustc-link-lib-l=static={}", TARGET_NAME);
+    } else {
+        // cmake config
+        let mut cfg = Config::new(LIB_NAME);
+        //cfg.profile("RelWithDebInfo");
+        //cfg.profile("Debug");
+        let dst = cfg.build_target(TARGET_NAME).build();
 
-    // link
-    let mut link_path = format!("{}/build/bin/CMake", dst.display());
-    let mut additional_args = "".to_owned();
-    if cfg!(windows) {
-        link_path = format!("{}/{}", link_path, cmake_profile);
-    } else if cfg!(unix) {
-        additional_args = "-l".to_owned();
+        // logging
+        let cmake_profile: String = cfg.get_profile().to_owned();
+        let rust_profile = std::env::var("PROFILE").unwrap();
+        p!("CMAKE_PROFILE : {}", cmake_profile);
+        p!("RUST_PROFILE : {}", rust_profile);
+        p!("DST: {}", dst.display());
+
+        // link
+        let mut link_path = format!("{}/build/bin/CMake", dst.display());
+        let mut additional_args = "".to_owned();
+        if cfg!(windows) {
+            link_path = format!("{}/{}", link_path, cmake_profile);
+        } else if cfg!(unix) {
+            additional_args = "-l".to_owned();
+        }
+
+        // link rustc
+        println!("cargo:rustc-link-search=native={}", link_path);
+        println!(
+            "cargo:rustc-link-lib{}=static={}",
+            additional_args, TARGET_NAME
+        );
     }
-
-    // link rustc
-    println!("cargo:rustc-link-search=native={}", link_path);
-    println!(
-        "cargo:rustc-link-lib{}=static={}",
-        additional_args, TARGET_NAME
-    );
 
     // extract resources
     let file_path = PathBuf::from("src/metadata-resources.csv");
