@@ -5,16 +5,14 @@
 #[cfg(test)]
 mod tests {
     use std::fs::create_dir_all;
+    use std::io::{self, Read};
     use std::path::Path;
     use std::time::Instant;
     use std::{fs, path::PathBuf};
 
-    use red4lib::archive::write_archive;
-    use red4lib::sha1_hash_file;
-    use red4lib::{
-        archive::{extract_archive, Archive},
-        get_red4_hashes,
-    };
+    use red4lib::archive::*;
+    use red4lib::io::FromReader;
+    use red4lib::*;
 
     #[test]
     fn time_csv() {
@@ -24,6 +22,18 @@ mod tests {
         let end = Instant::now();
         let duration = end - start;
         println!("Execution time csv: {:?}", duration);
+    }
+
+    #[test]
+    fn read_srxl() {
+        let file_path = PathBuf::from("tests").join("srxl.bin");
+        let mut file = fs::File::open(file_path).expect("Could not open file");
+        let mut buffer: Vec<u8> = vec![];
+        file.read_to_end(&mut buffer).expect("Could not read file");
+
+        let mut cursor = io::Cursor::new(&buffer);
+
+        let _srxl = LxrsFooter::from_reader(&mut cursor).unwrap();
     }
 
     #[test]
@@ -71,8 +81,12 @@ mod tests {
         assert!(result.is_ok());
 
         // check
-        let expected_files = get_files_in_folder_recursive(&data_path);
-        let expected = expected_files
+        let binding = get_files_in_folder_recursive(&data_path);
+        let mut expected_files = binding
+            .iter()
+            .filter(|f| !f.ends_with(".DS_Store"))
+            .collect::<Vec<_>>();
+        let mut expected = expected_files
             .iter()
             .map(|f| {
                 // Convert the absolute path to a relative path
@@ -83,10 +97,15 @@ mod tests {
                 }
             })
             .map(|f| f.to_string_lossy().to_ascii_lowercase())
+            .map(|f| f.replace('\\', "/"))
             .collect::<Vec<_>>();
 
-        let found_files = get_files_in_folder_recursive(&dst_path);
-        let found = found_files
+        let binding = get_files_in_folder_recursive(&dst_path);
+        let mut found_files = binding
+            .iter()
+            .filter(|f| !f.ends_with(".DS_Store"))
+            .collect::<Vec<_>>();
+        let mut found = found_files
             .iter()
             .map(|f| {
                 // Convert the absolute path to a relative path
@@ -97,14 +116,20 @@ mod tests {
                 }
             })
             .map(|f| f.to_string_lossy().to_ascii_lowercase())
+            .map(|f| f.replace('\\', "/"))
             .collect::<Vec<_>>();
+
+        expected.sort();
+        found.sort();
+        expected_files.sort();
+        found_files.sort();
 
         assert_eq!(expected.len(), found.len());
         assert_eq!(expected, found);
 
         for (i, e) in expected_files.into_iter().enumerate() {
             let f = found_files.get(i).unwrap();
-            assert_binary_equality(&e, f);
+            assert_binary_equality(e, f);
         }
 
         // cleanup

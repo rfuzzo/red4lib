@@ -312,8 +312,8 @@ impl FromReader for LxrsFooter {
                 // buffer is compressed
                 let mut compressed_buffer = vec![0; zsize as usize];
                 reader.read_exact(&mut compressed_buffer[..])?;
-                let mut output_buffer = vec![0; size as usize];
-                let result = decompress(compressed_buffer, &mut output_buffer);
+                let mut output_buffer = vec![];
+                let result = decompress(compressed_buffer, &mut output_buffer, size as usize);
                 assert_eq!(result as u32, size);
 
                 // read from buffer
@@ -378,8 +378,8 @@ fn decompress_segment<R: Read + Seek, W: Write>(
         }
         let mut compressed_buffer = vec![0; segment.z_size as usize - 8];
         archive_reader.read_exact(&mut compressed_buffer[..])?;
-        let mut output_buffer = vec![0; size as usize];
-        let result = decompress(compressed_buffer, &mut output_buffer);
+        let mut output_buffer = vec![];
+        let result = decompress(compressed_buffer, &mut output_buffer, size as usize);
         assert_eq!(result as u32, size);
 
         // write

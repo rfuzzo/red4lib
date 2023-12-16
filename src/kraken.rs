@@ -33,15 +33,23 @@ pub enum CompressionLevel {
 }
 
 /// Decompresses a compressed buffer into another
-pub fn decompress(compressed_buffer: Vec<u8>, output_buffer: &mut Vec<u8>) -> i32 {
+pub fn decompress(compressed_buffer: Vec<u8>, output_buffer: &mut Vec<u8>, size: usize) -> i32 {
+    let mut buffer = vec![0; size * 2];
+    let result;
+
     unsafe {
-        Kraken_Decompress(
+        result = Kraken_Decompress(
             compressed_buffer.as_ptr(),
             compressed_buffer.len() as i64,
-            output_buffer.as_mut_ptr(),
-            output_buffer.len() as i64,
-        )
+            buffer.as_mut_ptr(),
+            size as i64,
+        );
+
+        buffer.resize(result as usize, 0);
+        *output_buffer = buffer;
     }
+
+    result
 }
 
 /// Compresses a buffer into another

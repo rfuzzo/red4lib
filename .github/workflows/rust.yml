@@ -2,26 +2,27 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Release]
+
     steps:
       - name: checkout
         uses: actions/checkout@v3
         with:
           submodules: 'true'
 
-      - name: unzip resources
-        run: |
-          cd src
-          Expand-Archive -Path .\metadata-resources.zip -DestinationPath .\
       
       - uses: actions-rs/toolchain@v1
         with:
@@ -29,9 +30,5 @@ jobs:
           toolchain: stable
           override: true
 
-      - uses: actions-rs/cargo@v1
-        with:
-          command: build
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
+      - run: cargo build
+      - run: cargo test
