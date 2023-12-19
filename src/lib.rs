@@ -1,9 +1,11 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
-pub mod archive;
-pub mod cr2w;
-pub mod io;
-pub mod kraken;
+pub(crate) mod archive;
+mod cr2w;
+mod io;
+mod kraken;
+
+pub mod archive_file;
 
 use std::collections::HashMap;
 use std::fs::{self};
@@ -233,7 +235,7 @@ pub fn get_red4_hashes() -> HashMap<u64, String> {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-/// TESTS
+// TESTS
 /////////////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]

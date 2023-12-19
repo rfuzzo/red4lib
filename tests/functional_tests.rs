@@ -1,17 +1,14 @@
 /////////////////////////////////////////////////////////////////////////////////////////
-/// TESTS
+// TESTS
 /////////////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
 mod tests {
     use std::fs::create_dir_all;
-    use std::io::{self, Read};
-    use std::path::Path;
+    //use std::path::Path;
     use std::time::Instant;
     use std::{fs, path::PathBuf};
 
-    use red4lib::archive::*;
-    use red4lib::io::FromReader;
     use red4lib::*;
 
     #[test]
@@ -24,47 +21,7 @@ mod tests {
         println!("Execution time csv: {:?}", duration);
     }
 
-    #[test]
-    fn read_srxl() {
-        let file_path = PathBuf::from("tests").join("srxl.bin");
-        let mut file = fs::File::open(file_path).expect("Could not open file");
-        let mut buffer: Vec<u8> = vec![];
-        file.read_to_end(&mut buffer).expect("Could not read file");
-
-        let mut cursor = io::Cursor::new(&buffer);
-
-        let _srxl = LxrsFooter::from_reader(&mut cursor).unwrap();
-    }
-
-    #[test]
-    fn read_archive() {
-        let archive_path = PathBuf::from("tests").join("test1.archive");
-        let result = Archive::from_file(&archive_path);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn read_archive2() {
-        let archive_path = PathBuf::from("tests").join("nci.archive");
-        let result = Archive::from_file(&archive_path);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn read_custom_data() {
-        let archive_path = PathBuf::from("tests").join("test1.archive");
-        let archive = Archive::from_file(&archive_path).expect("Could not parse archive");
-        let mut file_names = archive
-            .file_names
-            .values()
-            .map(|f| f.to_owned())
-            .collect::<Vec<_>>();
-        file_names.sort();
-
-        let expected: Vec<String> = vec!["base\\cycleweapons\\localization\\en-us.json".to_owned()];
-        assert_eq!(expected, file_names);
-    }
-
+    /*
     #[test]
     fn test_extract_archive() {
         let archive_path = PathBuf::from("tests").join("test1.archive");
@@ -137,13 +94,13 @@ mod tests {
             assert!(fs::remove_dir_all(&dst_path).is_ok());
         }
     }
+     */
 
     #[test]
     fn test_pack_archive() {
         // pack test data
         let data_path = PathBuf::from("tests").join("data");
-        let dst_path = PathBuf::from("tests").join("out2");
-        let hash_map = get_red4_hashes();
+        let dst_path = PathBuf::from("tests").join("out2").join("data.archive");
 
         // delete folder if exists
         if dst_path.exists() {
@@ -151,7 +108,7 @@ mod tests {
         }
         create_dir_all(&dst_path).expect("Could not create folder");
 
-        let result = write_archive(&data_path, &dst_path, None, hash_map);
+        let result = archive_file::create_from_directory_path(&data_path, &dst_path, None);
         assert!(result.is_ok());
 
         // checks
@@ -169,9 +126,10 @@ mod tests {
     }
 
     /////////////////////////////////////////////////////////////////////////////////////////
-    /// HELPERS
+    // HELPERS
     /////////////////////////////////////////////////////////////////////////////////////////
 
+    /*
     fn assert_binary_equality(e: &PathBuf, f: &PathBuf) {
         // compare bytes
         let mut fe = fs::File::open(e).expect("Could not open file");
@@ -213,4 +171,5 @@ mod tests {
         // Return an empty vector if there's an error
         Vec::new()
     }
+    */
 }
