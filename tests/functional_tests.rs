@@ -100,7 +100,8 @@ mod tests {
     fn test_pack_archive() {
         // pack test data
         let data_path = PathBuf::from("tests").join("data");
-        let dst_path = PathBuf::from("tests").join("out2").join("data.archive");
+        let dst_path = PathBuf::from("tests").join("out2");
+        let dst_file = dst_path.join("data.archive");
 
         // delete folder if exists
         if dst_path.exists() {
@@ -108,12 +109,11 @@ mod tests {
         }
         create_dir_all(&dst_path).expect("Could not create folder");
 
-        let result = archive_file::create_from_directory_path(&data_path, &dst_path, None);
+        let result = archive_file::create_from_directory_path(&data_path, &dst_file, None);
         assert!(result.is_ok());
 
         // checks
-        let created_path = dst_path.join("data.archive");
-        assert!(created_path.exists());
+        assert!(dst_file.exists());
 
         // TODO binary equality
         // let existing_path = PathBuf::from("tests").join("test1.archive");
