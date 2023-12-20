@@ -4,9 +4,9 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Read, Result, Write};
+use std::io::{self, Read, Result, Seek, Write};
 use std::mem;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::fnv1a64_hash_string;
 use crate::io::*;
@@ -15,23 +15,22 @@ use crate::kraken::*;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Archive {
-    pub(crate) header: Header,
-    pub(crate) index: Index,
+pub struct Archive {
+    pub header: Header,
+    pub index: Index,
 
     // custom
-    pub(crate) file_names: HashMap<u64, String>,
+    pub file_names: HashMap<u64, String>,
 }
 
 impl Archive {
     // Function to read a Header from a file
-    pub fn from_file<P>(file_path: &P) -> Result<Archive>
+    pub fn from_file<P>(file_path: P) -> Result<Archive>
     where
         P: AsRef<Path>,
     {
         let mut file = File::open(file_path)?;
         let mut buffer = Vec::with_capacity(mem::size_of::<Header>());
-
         file.read_to_end(&mut buffer)?;
 
         // Ensure that the buffer has enough bytes to represent a Header
@@ -43,14 +42,22 @@ impl Archive {
         }
 
         let mut cursor = io::Cursor::new(&buffer);
-        let header = Header::from_reader(&mut cursor)?;
+
+        Archive::from_reader(&mut cursor)
+    }
+
+    pub fn from_reader<R>(cursor: &mut R) -> Result<Archive>
+    where
+        R: Read + Seek,
+    {
+        let header = Header::from_reader(cursor)?;
 
         // read custom data
         let mut file_names: HashMap<u64, String> = HashMap::default();
         if let Ok(custom_data_length) = cursor.read_u32::<LittleEndian>() {
             if custom_data_length > 0 {
-                cursor.set_position(Header::HEADER_EXTENDED_SIZE);
-                if let Ok(footer) = LxrsFooter::from_reader(&mut cursor) {
+                cursor.seek(io::SeekFrom::Start(Header::HEADER_EXTENDED_SIZE))?;
+                if let Ok(footer) = LxrsFooter::from_reader(cursor) {
                     // add files to hashmap
                     for f in footer.files {
                         let hash = fnv1a64_hash_string(&f);
@@ -61,8 +68,8 @@ impl Archive {
         }
 
         // move to offset Header.IndexPosition
-        cursor.set_position(header.index_position);
-        let index = Index::from_reader(&mut cursor)?;
+        cursor.seek(io::SeekFrom::Start(header.index_position))?;
+        let index = Index::from_reader(cursor)?;
 
         Ok(Archive {
             header,
@@ -72,7 +79,7 @@ impl Archive {
     }
 
     // get filehashes
-    pub(crate) fn get_file_hashes(&self) -> Vec<u64> {
+    pub fn get_file_hashes(&self) -> Vec<u64> {
         self.index
             .file_entries
             .iter()
@@ -82,7 +89,7 @@ impl Archive {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Header {
+pub struct Header {
     pub magic: u32,
     pub version: u32,
     pub index_position: u64,
@@ -376,21 +383,21 @@ mod integration_tests {
     #[test]
     fn read_archive() {
         let archive_path = PathBuf::from("tests").join("test1.archive");
-        let result = Archive::from_file(&archive_path);
+        let result = Archive::from_file(archive_path);
         assert!(result.is_ok());
     }
 
     #[test]
     fn read_archive2() {
         let archive_path = PathBuf::from("tests").join("nci.archive");
-        let result = Archive::from_file(&archive_path);
+        let result = Archive::from_file(archive_path);
         assert!(result.is_ok());
     }
 
     #[test]
     fn read_custom_data() {
         let archive_path = PathBuf::from("tests").join("test1.archive");
-        let archive = Archive::from_file(&archive_path).expect("Could not parse archive");
+        let archive = Archive::from_file(archive_path).expect("Could not parse archive");
         let mut file_names = archive
             .file_names
             .values()

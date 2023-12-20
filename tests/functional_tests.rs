@@ -5,10 +5,12 @@
 #[cfg(test)]
 mod tests {
     use std::fs::create_dir_all;
+    use std::path::Path;
     //use std::path::Path;
     use std::time::Instant;
     use std::{fs, path::PathBuf};
 
+    use red4lib::archive_file::extract_to_directory_path;
     use red4lib::*;
 
     #[test]
@@ -21,7 +23,6 @@ mod tests {
         println!("Execution time csv: {:?}", duration);
     }
 
-    /*
     #[test]
     fn test_extract_archive() {
         let archive_path = PathBuf::from("tests").join("test1.archive");
@@ -34,7 +35,7 @@ mod tests {
             assert!(fs::remove_dir_all(&dst_path).is_ok());
         }
 
-        let result = extract_archive(&archive_path, &dst_path, &hashes);
+        let result = extract_to_directory_path(&archive_path, &dst_path, true, Some(hashes));
         assert!(result.is_ok());
 
         // check
@@ -94,7 +95,6 @@ mod tests {
             assert!(fs::remove_dir_all(&dst_path).is_ok());
         }
     }
-     */
 
     #[test]
     fn test_pack_archive() {
@@ -129,7 +129,6 @@ mod tests {
     // HELPERS
     /////////////////////////////////////////////////////////////////////////////////////////
 
-    /*
     fn assert_binary_equality(e: &PathBuf, f: &PathBuf) {
         // compare bytes
         let mut fe = fs::File::open(e).expect("Could not open file");
@@ -171,5 +170,4 @@ mod tests {
         // Return an empty vector if there's an error
         Vec::new()
     }
-    */
 }

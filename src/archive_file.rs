@@ -15,7 +15,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{create_dir_all, File},
     io::{self, BufWriter, Read, Result, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -32,7 +32,7 @@ use crate::{
 
 // public static void CreateFromDirectory (string sourceDirectoryName, System.IO.Stream destination);
 
-/// Creates a zip archive in the specified stream that contains the files and directories from the specified directory.
+/// Creates an archive in the specified stream that contains the files and directories from the specified directory.
 ///
 /// # Errors
 ///
@@ -57,7 +57,7 @@ where
 
 // public static void CreateFromDirectory (string sourceDirectoryName, string destinationArchiveFileName);
 
-/// Creates a zip archive that contains the files and directories from the specified directory.
+/// Creates an archive that contains the files and directories from the specified directory.
 ///
 /// # Errors
 ///
@@ -82,20 +82,28 @@ where
 
 // public static void ExtractToDirectory (System.IO.Stream source, string destinationDirectoryName, bool overwriteFiles);
 
-/// Extracts all the files from the zip archive stored in the specified stream and places them in the specified destination directory on the file system, and optionally allows choosing if the files in the destination directory should be overwritten.
+/// Extracts all the files from the archive stored in the specified stream and places them in the specified destination directory on the file system, and optionally allows choosing if the files in the destination directory should be overwritten.
 ///
 /// # Errors
 ///
 /// This function will return an error if any io fails.
 pub fn extract_to_directory<R, P>(
-    source: R,
-    destination_directory_name: P,
+    source: &mut R,
+    destination_directory_name: &P,
     overwrite_files: bool,
+    hash_map: Option<HashMap<u64, String>>,
 ) -> io::Result<()>
 where
     P: AsRef<Path>,
-    R: Read,
+    R: Read + Seek,
 {
+    let map = if let Some(hash_map) = hash_map {
+        hash_map
+    } else {
+        get_red4_hashes()
+    };
+
+    extract_archive(source, destination_directory_name, overwrite_files, &map)
 }
 
 // public static void ExtractToDirectory (string sourceArchiveFileName, string destinationDirectoryName, bool overwriteFiles);
@@ -106,17 +114,28 @@ where
 ///
 /// This function will return an error if any io fails.
 pub fn extract_to_directory_path<P>(
-    source_archive_file_name: P,
-    destination_directory_name: P,
+    source_archive_file_name: &P,
+    destination_directory_name: &P,
     overwrite_files: bool,
+    hash_map: Option<HashMap<u64, String>>,
 ) -> io::Result<()>
 where
     P: AsRef<Path>,
 {
+    let map = if let Some(hash_map) = hash_map {
+        hash_map
+    } else {
+        get_red4_hashes()
+    };
+
+    let archive_file = File::open(source_archive_file_name)?;
+    let mut archive_reader = io::BufReader::new(archive_file);
+
     extract_archive(
-        source_archive_file_name,
+        &mut archive_reader,
         destination_directory_name,
         overwrite_files,
+        &map,
     )
 }
 
@@ -126,9 +145,14 @@ pub enum ArchiveMode {
     Update,
 }
 
+/*
+TODO We don't support different modes for now
+needs a wrapper class for archives
+
+
 // public static System.IO.Compression.ZipArchive Open (string archiveFileName, System.IO.Compression.ZipArchiveMode mode);
 
-/// Opens a zip archive at the specified path and in the specified mode.
+/// Opens an archive at the specified path and in the specified mode.
 ///
 /// # Errors
 ///
@@ -140,9 +164,11 @@ where
     todo!()
 }
 
+ */
+
 // public static System.IO.Compression.ZipArchive OpenRead (string archiveFileName);
 
-/// Opens a zip archive for reading at the specified path.
+/// Opens an archive for reading at the specified path.
 ///
 /// # Errors
 ///
@@ -151,7 +177,7 @@ pub fn open_read<P>(archive_file_name: P) -> io::Result<Archive>
 where
     P: AsRef<Path>,
 {
-    todo!()
+    Archive::from_file(archive_file_name)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -167,15 +193,18 @@ where
 /// # Errors
 ///
 /// This function will return an error if any parsing fails
-fn extract_archive<P>(in_file: &P, out_dir: &P, hash_map: &HashMap<u64, String>) -> io::Result<()>
+fn extract_archive<P, R>(
+    archive_reader: &mut R,
+    out_dir: &P,
+    overwrite_files: bool,
+    hash_map: &HashMap<u64, String>,
+) -> io::Result<()>
 where
     P: AsRef<Path>,
+    R: Read + Seek,
 {
     // parse archive headers
-    let archive = Archive::from_file(in_file)?;
-
-    let archive_file = File::open(in_file)?;
-    let mut archive_reader = io::BufReader::new(archive_file);
+    let archive = Archive::from_reader(archive_reader)?;
 
     for (hash, file_entry) in archive.index.file_entries.iter() {
         // get filename
@@ -188,12 +217,21 @@ where
         }
 
         // name or hash is a relative path
-        let mut: PathBuf
-        let outfile = out_dir.join(name_or_hash);
+        let outfile = out_dir.as_ref().join(name_or_hash);
         create_dir_all(outfile.parent().expect("Could not create an out_dir"))?;
 
         // extract to stream
-        let mut fs = File::create(outfile)?;
+        let mut fs = if overwrite_files {
+            File::create(outfile)?
+        } else {
+            File::options()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(outfile)?
+        };
+
+        //let mut fs = File::create(outfile)?;
         let mut file_writer = BufWriter::new(&mut fs);
         // decompress main file
         let start_index = file_entry.segments_start;
@@ -209,7 +247,7 @@ where
                 archive_reader.read_exact(&mut buffer[..])?;
                 file_writer.write_all(&buffer)?;
             } else {
-                decompress_segment(&mut archive_reader, segment, &mut file_writer)?;
+                decompress_segment(archive_reader, segment, &mut file_writer)?;
             }
         }
 
