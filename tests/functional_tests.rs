@@ -6,11 +6,9 @@
 mod tests {
     use std::fs::create_dir_all;
     use std::path::Path;
-    //use std::path::Path;
     use std::time::Instant;
     use std::{fs, path::PathBuf};
 
-    use red4lib::archive_file::extract_to_directory_path;
     use red4lib::*;
 
     #[test]
@@ -35,7 +33,8 @@ mod tests {
             assert!(fs::remove_dir_all(&dst_path).is_ok());
         }
 
-        let result = extract_to_directory_path(&archive_path, &dst_path, true, Some(hashes));
+        let result =
+            archive::extract_to_directory_path(&archive_path, &dst_path, true, Some(hashes));
         assert!(result.is_ok());
 
         // check
@@ -109,7 +108,7 @@ mod tests {
         }
         create_dir_all(&dst_path).expect("Could not create folder");
 
-        let result = archive_file::create_from_directory_path(&data_path, &dst_file, None);
+        let result = archive::create_from_directory_path(&data_path, &dst_file, None);
         assert!(result.is_ok());
 
         // checks
