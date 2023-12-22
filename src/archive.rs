@@ -142,12 +142,6 @@ where
     )
 }
 
-pub enum ArchiveMode {
-    Create,
-    Read,
-    Update,
-}
-
 /*
 TODO We don't support different modes for now
 needs a wrapper class for archives
@@ -176,11 +170,17 @@ where
 /// # Errors
 ///
 /// This function will return an error if any io fails.
-pub fn open_read<P>(archive_file_name: P) -> Result<Archive>
+pub fn open_read<P>(archive_file_name: P) -> Result<ZipArchive>
 where
     P: AsRef<Path>,
 {
-    Archive::from_file(archive_file_name)
+    let ar = Archive::from_file(archive_file_name)?;
+
+    let a: ZipArchive = ZipArchive {
+        mode: ArchiveMode::Read,
+    };
+
+    Ok(a)
 }
 
 /// Extracts all files from an archive and writes them to a folder
@@ -590,21 +590,35 @@ fn pad_until_page<W: Write + Seek>(writer: &mut W) -> Result<()> {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// TODO API
+/////////////////////////////////////////////////////////////////////////////////////////
+
+pub enum ArchiveMode {
+    Create,
+    Read,
+    Update,
+}
+
+pub struct ZipArchive {
+    mode: ArchiveMode,
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // INTERNAL
 /////////////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, Default)]
-pub struct Archive {
-    pub header: Header,
-    pub index: Index,
+struct Archive {
+    header: Header,
+    index: Index,
 
     // custom
-    pub file_names: HashMap<u64, String>,
+    file_names: HashMap<u64, String>,
 }
 
 impl Archive {
     // Function to read a Header from a file
-    pub fn from_file<P>(file_path: P) -> Result<Archive>
+    fn from_file<P>(file_path: P) -> Result<Archive>
     where
         P: AsRef<Path>,
     {
@@ -625,7 +639,7 @@ impl Archive {
         Archive::from_reader(&mut cursor)
     }
 
-    pub fn from_reader<R>(cursor: &mut R) -> Result<Archive>
+    fn from_reader<R>(cursor: &mut R) -> Result<Archive>
     where
         R: Read + Seek,
     {
@@ -658,7 +672,7 @@ impl Archive {
     }
 
     // get filehashes
-    pub fn get_file_hashes(&self) -> Vec<u64> {
+    fn get_file_hashes(&self) -> Vec<u64> {
         self.index
             .file_entries
             .iter()
@@ -668,20 +682,20 @@ impl Archive {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Header {
-    pub magic: u32,
-    pub version: u32,
-    pub index_position: u64,
-    pub index_size: u32,
-    pub debug_position: u64,
-    pub debug_size: u32,
-    pub filesize: u64,
+struct Header {
+    magic: u32,
+    version: u32,
+    index_position: u64,
+    index_size: u32,
+    debug_position: u64,
+    debug_size: u32,
+    filesize: u64,
 }
 
 impl Header {
     //static HEADER_MAGIC: u32 = 1380009042;
     //static HEADER_SIZE: i32 = 40;
-    pub const HEADER_EXTENDED_SIZE: u64 = 0xAC;
+    const HEADER_EXTENDED_SIZE: u64 = 0xAC;
 }
 
 impl Default for Header {
@@ -712,7 +726,7 @@ impl FromReader for Header {
     }
 }
 impl Header {
-    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<LittleEndian>(self.magic)?;
         writer.write_u32::<LittleEndian>(self.version)?;
         writer.write_u64::<LittleEndian>(self.index_position)?;
@@ -726,21 +740,21 @@ impl Header {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Index {
-    pub file_table_offset: u32,
-    pub file_table_size: u32,
-    pub crc: u64,
-    pub file_entry_count: u32,
-    pub file_segment_count: u32,
-    pub resource_dependency_count: u32,
+struct Index {
+    file_table_offset: u32,
+    file_table_size: u32,
+    crc: u64,
+    file_entry_count: u32,
+    file_segment_count: u32,
+    resource_dependency_count: u32,
 
     // not serialized
-    pub file_entries: HashMap<u64, FileEntry>,
-    pub file_segments: Vec<FileSegment>,
-    pub dependencies: Vec<Dependency>,
+    file_entries: HashMap<u64, FileEntry>,
+    file_segments: Vec<FileSegment>,
+    dependencies: Vec<Dependency>,
 }
 impl Index {
-    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<LittleEndian>(self.file_table_offset)?;
         writer.write_u32::<LittleEndian>(self.file_table_size)?;
         writer.write_u64::<LittleEndian>(self.crc)?;
@@ -787,10 +801,10 @@ impl FromReader for Index {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct FileSegment {
-    pub offset: u64,
-    pub z_size: u32,
-    pub size: u32,
+struct FileSegment {
+    offset: u64,
+    z_size: u32,
+    size: u32,
 }
 
 impl FromReader for FileSegment {
@@ -804,15 +818,15 @@ impl FromReader for FileSegment {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct FileEntry {
-    pub name_hash_64: u64,
-    pub timestamp: u64, //SystemTime,
-    pub num_inline_buffer_segments: u32,
-    pub segments_start: u32,
-    pub segments_end: u32,
-    pub resource_dependencies_start: u32,
-    pub resource_dependencies_end: u32,
-    pub sha1_hash: [u8; 20],
+struct FileEntry {
+    name_hash_64: u64,
+    timestamp: u64, //SystemTime,
+    num_inline_buffer_segments: u32,
+    segments_start: u32,
+    segments_end: u32,
+    resource_dependencies_start: u32,
+    resource_dependencies_end: u32,
+    sha1_hash: [u8; 20],
 }
 
 impl FromReader for FileEntry {
@@ -835,8 +849,8 @@ impl FromReader for FileEntry {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Dependency {
-    pub hash: u64,
+struct Dependency {
+    hash: u64,
 }
 
 impl FromReader for Dependency {
@@ -848,8 +862,8 @@ impl FromReader for Dependency {
 }
 
 #[derive(Debug, Clone)]
-pub struct LxrsFooter {
-    pub files: Vec<String>,
+struct LxrsFooter {
+    files: Vec<String>,
 }
 
 impl LxrsFooter {
@@ -857,7 +871,7 @@ impl LxrsFooter {
     const MAGIC: u32 = 0x4C585253;
     const VERSION: u32 = 1;
 
-    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<LittleEndian>(self.files.len() as u32)?;
         writer.write_u32::<LittleEndian>(LxrsFooter::VERSION)?;
 
