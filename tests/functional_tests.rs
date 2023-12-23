@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::fs::create_dir_all;
+    use std::fs::{create_dir_all, File};
     use std::path::Path;
     use std::time::Instant;
     use std::{fs, path::PathBuf};
@@ -33,8 +33,12 @@ mod tests {
             assert!(fs::remove_dir_all(&dst_path).is_ok());
         }
 
-        let result =
-            archive::extract_to_directory_path(&archive_path, &dst_path, true, Some(hashes));
+        let result = archive::extract_to_directory_path::<PathBuf, File>(
+            &archive_path,
+            &dst_path,
+            true,
+            Some(hashes),
+        );
         assert!(result.is_ok());
 
         // check

@@ -6,10 +6,10 @@ use std::cmp::Ordering;
 use std::{
     collections::{HashMap, HashSet},
     fs::{create_dir_all, File},
-    io::{BufReader, BufWriter, Cursor, Read, Result, Seek, SeekFrom, Write},
+    io::{BufWriter, Cursor, Read, Result, Seek, SeekFrom, Write},
     path::Path,
 };
-use std::{io, mem};
+use std::{io, vec};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use strum::IntoEnumIterator;
@@ -98,15 +98,10 @@ pub fn extract_to_directory<R, P>(
 ) -> Result<()>
 where
     P: AsRef<Path>,
-    R: Read + Seek,
+    R: Read + Seek + 'static,
 {
-    let map = if let Some(hash_map) = hash_map {
-        hash_map
-    } else {
-        get_red4_hashes()
-    };
-
-    extract_archive(source, destination_directory_name, overwrite_files, &map)
+    let mut archive = ZipArchive::from_reader(source, ArchiveMode::Read)?;
+    archive.extract_to_directory(destination_directory_name, overwrite_files, hash_map)
 }
 
 // public static void ExtractToDirectory (string sourceArchiveFileName, string destinationDirectoryName, bool overwriteFiles);
@@ -116,7 +111,7 @@ where
 /// # Errors
 ///
 /// This function will return an error if any io fails.
-pub fn extract_to_directory_path<P>(
+pub fn extract_to_directory_path<P, R>(
     source_archive_file_name: &P,
     destination_directory_name: &P,
     overwrite_files: bool,
@@ -124,28 +119,12 @@ pub fn extract_to_directory_path<P>(
 ) -> Result<()>
 where
     P: AsRef<Path>,
+    R: Read + Seek,
 {
-    let map = if let Some(hash_map) = hash_map {
-        hash_map
-    } else {
-        get_red4_hashes()
-    };
-
-    let archive_file = File::open(source_archive_file_name)?;
-    let mut archive_reader = BufReader::new(archive_file);
-
-    extract_archive(
-        &mut archive_reader,
-        destination_directory_name,
-        overwrite_files,
-        &map,
-    )
+    let mut file = File::open(source_archive_file_name)?;
+    let mut archive = ZipArchive::from_reader(&mut file, ArchiveMode::Read)?;
+    archive.extract_to_directory(destination_directory_name, overwrite_files, hash_map)
 }
-
-/*
-TODO We don't support different modes for now
-needs a wrapper class for archives
-
 
 // public static System.IO.Compression.ZipArchive Open (string archiveFileName, System.IO.Compression.ZipArchiveMode mode);
 
@@ -154,14 +133,20 @@ needs a wrapper class for archives
 /// # Errors
 ///
 /// This function will return an error if any io fails.
-pub fn open<P>(archive_file_name: P, mode: ArchiveMode) -> Result<Archive>
+pub fn open<P, S>(archive_file_name: P, mode: ArchiveMode) -> Result<ZipArchive<'static, S>>
 where
     P: AsRef<Path>,
 {
-    todo!()
-}
+    let archive = match mode {
+        ArchiveMode::Create => todo!(),
+        //ArchiveMode::Read => ZipArchive::from_file(archive_file_name, mode)?,
+        ArchiveMode::Read => todo!(),
+        //ArchiveMode::Update => ZipArchive::from_file(archive_file_name, mode)?,
+        ArchiveMode::Update => todo!(),
+    };
 
- */
+    //Ok(archive)
+}
 
 // public static System.IO.Compression.ZipArchive OpenRead (string archiveFileName);
 
@@ -170,99 +155,12 @@ where
 /// # Errors
 ///
 /// This function will return an error if any io fails.
-pub fn open_read<P>(archive_file_name: P) -> Result<ZipArchive>
+pub fn open_read<P>(archive_file_name: P) -> Result<ZipArchive<'static, File>>
 where
     P: AsRef<Path>,
 {
-    let ar = Archive::from_file(archive_file_name)?;
-
-    let a: ZipArchive = ZipArchive {
-        mode: ArchiveMode::Read,
-    };
-
-    Ok(a)
-}
-
-/// Extracts all files from an archive and writes them to a folder
-///
-/// # Panics
-///
-/// Panics if file path operations fail
-///
-/// # Errors
-///
-/// This function will return an error if any parsing fails
-fn extract_archive<P, R>(
-    archive_reader: &mut R,
-    out_dir: &P,
-    overwrite_files: bool,
-    hash_map: &HashMap<u64, String>,
-) -> Result<()>
-where
-    P: AsRef<Path>,
-    R: Read + Seek,
-{
-    // parse archive headers
-    let archive = Archive::from_reader(archive_reader)?;
-
-    for (hash, file_entry) in archive.index.file_entries.iter() {
-        // get filename
-        let mut name_or_hash: String = format!("{}.bin", hash);
-        if let Some(name) = hash_map.get(hash) {
-            name_or_hash = name.to_owned();
-        }
-        if let Some(name) = archive.file_names.get(hash) {
-            name_or_hash = name.to_owned();
-        }
-
-        // name or hash is a relative path
-        let outfile = out_dir.as_ref().join(name_or_hash);
-        create_dir_all(outfile.parent().expect("Could not create an out_dir"))?;
-
-        // extract to stream
-        let mut fs = if overwrite_files {
-            File::create(outfile)?
-        } else {
-            File::options()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(outfile)?
-        };
-
-        //let mut fs = File::create(outfile)?;
-        let mut file_writer = BufWriter::new(&mut fs);
-        // decompress main file
-        let start_index = file_entry.segments_start;
-        let next_index = file_entry.segments_end;
-        if let Some(segment) = archive.index.file_segments.get(start_index as usize) {
-            // read and decompress from main archive stream
-
-            // kraken decompress
-            if segment.size == segment.z_size {
-                // just copy over
-                archive_reader.seek(SeekFrom::Start(segment.offset))?;
-                let mut buffer = vec![0; segment.z_size as usize];
-                archive_reader.read_exact(&mut buffer[..])?;
-                file_writer.write_all(&buffer)?;
-            } else {
-                decompress_segment(archive_reader, segment, &mut file_writer)?;
-            }
-        }
-
-        // extract additional buffers
-        for i in start_index + 1..next_index {
-            if let Some(segment) = archive.index.file_segments.get(i as usize) {
-                // do not decompress with oodle
-                archive_reader.seek(SeekFrom::Start(segment.offset))?;
-                let mut buffer = vec![0; segment.z_size as usize];
-                archive_reader.read_exact(&mut buffer[..])?;
-                file_writer.write_all(&buffer)?;
-            }
-        }
-    }
-
-    Ok(())
+    let file = File::open(archive_file_name)?;
+    ZipArchive::from_reader_consume(file, ArchiveMode::Read)
 }
 
 /// Packs redengine 4 resource file in a folder to an archive
@@ -280,14 +178,6 @@ where
     W: Write + Seek,
 {
     /*if !in_folder.exists() {
-        return Err(Error::new(ErrorKind::InvalidInput, ""));
-    }
-
-    if !out_folder.exists() {
-        return Err(Error::new(ErrorKind::InvalidInput, ""));
-    }
-    // check extension
-    if !out_folder.exists() {
         return Err(Error::new(ErrorKind::InvalidInput, ""));
     }*/
 
@@ -590,17 +480,339 @@ fn pad_until_page<W: Write + Seek>(writer: &mut W) -> Result<()> {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// TODO API
+// API
 /////////////////////////////////////////////////////////////////////////////////////////
 
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum ArchiveMode {
+    #[default]
     Create,
     Read,
     Update,
 }
 
-pub struct ZipArchive {
+#[derive(Debug)]
+pub struct ZipArchive<'a, S> {
+    /// wraps an Archive internally
+    internal_archive: Archive,
+    /// wraps a stream
+    stream: &'a mut S,
+
+    /// The read-write mode of the archive
     mode: ArchiveMode,
+    /// The files inside an archive
+    entries: HashMap<u64, ZipEntry>,
+}
+
+/*impl<'a> ZipArchive<'a, File> {
+    /// Opens an archive from a file in a specific mode
+    fn from_file<P>(file_path: P, mode: ArchiveMode) -> Result<ZipArchive<'a, File>>
+    where
+        P: AsRef<Path>,
+    {
+        // checks
+        if mode == ArchiveMode::Create {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Can only construct an archive in read-only mode.",
+            ));
+        }
+
+        let mut file = File::open(file_path)?;
+        ZipArchive::from_reader(&mut file, mode)
+    }
+}*/
+
+impl<R> ZipArchive<'_, R>
+where
+    R: Read + Seek,
+{
+    pub fn extract_to_directory<P>(
+        &mut self,
+        destination_directory_name: &P,
+        overwrite_files: bool,
+        hash_map: Option<HashMap<u64, String>>,
+    ) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        let hash_map = if let Some(hash_map) = hash_map {
+            hash_map
+        } else {
+            get_red4_hashes()
+        };
+
+        // collect info
+        let mut temp: Vec<(String, FileSegment, Vec<FileSegment>)> = vec![];
+        for (hash, file_entry) in self.entries.iter() {
+            // get filename
+            let resolved = if let Some(name) = &file_entry.name {
+                name.to_owned()
+            } else {
+                let mut name_or_hash: String = format!("{}.bin", hash);
+                // check vanilla hashes
+                if let Some(name) = hash_map.get(&hash) {
+                    name_or_hash = name.to_owned();
+                }
+                name_or_hash
+            };
+
+            let start_index = file_entry.segments_start();
+            let next_index = file_entry.segments_end();
+
+            if let Some(segment) = self.get_file_segment(start_index as usize) {
+                let mut buffers: Vec<FileSegment> = vec![];
+                for i in start_index + 1..next_index {
+                    if let Some(segment) = self.get_file_segment(i as usize) {
+                        buffers.push(*segment);
+                    }
+                }
+                temp.push((resolved, *segment, buffers));
+            }
+        }
+
+        // extract
+        for (resolved, segment, buffers) in temp {
+            // name or hash is a relative path
+            let outfile = destination_directory_name.as_ref().join(resolved);
+            create_dir_all(outfile.parent().expect("Could not create an out_dir"))?;
+
+            // extract to stream
+            let mut fs = if overwrite_files {
+                File::create(outfile)?
+            } else {
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(outfile)?
+            };
+
+            //let mut fs = File::create(outfile)?;
+            let mut file_writer = BufWriter::new(&mut fs);
+            // decompress main file
+            //let start_index = file_entry.segments_start();
+            //let next_index = file_entry.segments_end();
+            //if let Some(segment) = self.get_file_segment(start_index as usize) {
+            // read and decompress from main archive stream
+
+            // kraken decompress
+            if segment.size == segment.z_size {
+                // just copy
+                self.reader_mut().seek(SeekFrom::Start(segment.offset))?;
+                let mut buffer = vec![0; segment.z_size as usize];
+                self.reader_mut().read_exact(&mut buffer[..])?;
+                file_writer.write_all(&buffer)?;
+            } else {
+                decompress_segment(self.reader_mut(), &segment, &mut file_writer)?;
+            }
+            //}
+
+            // extract additional buffers
+            //for i in start_index + 1..next_index {
+            for segment in buffers {
+                //if let Some(segment) = self.get_file_segment(i as usize) {
+                // do not decompress with oodle
+                self.reader_mut().seek(SeekFrom::Start(segment.offset))?;
+                let mut buffer = vec![0; segment.z_size as usize];
+                self.reader_mut().read_exact(&mut buffer[..])?;
+                file_writer.write_all(&buffer)?;
+                //}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn reader_mut(&mut self) -> &mut R {
+        self.stream
+    }
+
+    fn reader(&self) -> &R {
+        &self.stream
+    }
+
+    /// Opens an archive from, needs to be read-only
+    fn from_reader_consume<'a>(mut reader: R, mode: ArchiveMode) -> Result<ZipArchive<'a, R>> {
+        // checks
+        if mode == ArchiveMode::Create {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Can only construct an archive in read-only mode.",
+            ));
+        }
+
+        // read header
+        let header = Header::from_reader(&mut reader)?;
+
+        // read custom data
+        let mut file_names: HashMap<u64, String> = HashMap::default();
+        if let Ok(custom_data_length) = reader.read_u32::<LittleEndian>() {
+            if custom_data_length > 0 {
+                reader.seek(io::SeekFrom::Start(Header::HEADER_EXTENDED_SIZE))?;
+                if let Ok(footer) = LxrsFooter::from_reader(&mut reader) {
+                    // add files to hashmap
+                    for f in footer.files {
+                        let hash = fnv1a64_hash_string(&f);
+                        file_names.insert(hash, f);
+                    }
+                }
+            }
+        }
+
+        // read index
+        // move to offset Header.IndexPosition
+        reader.seek(io::SeekFrom::Start(header.index_position))?;
+        let index = Index::from_reader(&mut reader)?;
+
+        // construct wrapper
+        let internal_archive = Archive { header, index };
+        let mut entries: HashMap<u64, ZipEntry> = HashMap::default();
+        for (hash, entry) in internal_archive.index.file_entries.iter() {
+            let resolved = if let Some(name) = file_names.get(hash) {
+                Some(name.to_owned())
+            } else {
+                None
+            };
+
+            let zip_entry = ZipEntry::new(*hash, resolved, *entry);
+            entries.insert(*hash, zip_entry);
+        }
+
+        let archive = ZipArchive::<'a, R> {
+            stream: &mut reader,
+            internal_archive,
+            mode,
+            entries,
+        };
+        Ok(archive)
+    }
+
+    /// Opens an archive from, needs to be read-only
+    fn from_reader<'a>(mut reader: &'a mut R, mode: ArchiveMode) -> Result<ZipArchive<'a, R>> {
+        // checks
+        if mode == ArchiveMode::Create {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Can only construct an archive in read-only mode.",
+            ));
+        }
+
+        // read header
+        let header = Header::from_reader(&mut reader)?;
+
+        // read custom data
+        let mut file_names: HashMap<u64, String> = HashMap::default();
+        if let Ok(custom_data_length) = reader.read_u32::<LittleEndian>() {
+            if custom_data_length > 0 {
+                reader.seek(io::SeekFrom::Start(Header::HEADER_EXTENDED_SIZE))?;
+                if let Ok(footer) = LxrsFooter::from_reader(&mut reader) {
+                    // add files to hashmap
+                    for f in footer.files {
+                        let hash = fnv1a64_hash_string(&f);
+                        file_names.insert(hash, f);
+                    }
+                }
+            }
+        }
+
+        // read index
+        // move to offset Header.IndexPosition
+        reader.seek(io::SeekFrom::Start(header.index_position))?;
+        let index = Index::from_reader(&mut reader)?;
+
+        // construct wrapper
+        let internal_archive = Archive { header, index };
+        let mut entries: HashMap<u64, ZipEntry> = HashMap::default();
+        for (hash, entry) in internal_archive.index.file_entries.iter() {
+            let resolved = if let Some(name) = file_names.get(hash) {
+                Some(name.to_owned())
+            } else {
+                None
+            };
+
+            let zip_entry = ZipEntry::new(*hash, resolved, *entry);
+            entries.insert(*hash, zip_entry);
+        }
+
+        let archive = ZipArchive::<R> {
+            stream: reader,
+            internal_archive,
+            mode,
+            entries,
+        };
+        Ok(archive)
+    }
+}
+
+impl<W: Write + Seek> ZipArchive<'_, W> {}
+
+impl<S> ZipArchive<'_, S> {
+    /// Compresses and adds a file to the archive.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if compression or io fails, or if the mode is Read.
+    pub fn create_entry<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        compression_level: CompressionLevel,
+    ) -> Result<ZipEntry> {
+        if self.mode == ArchiveMode::Read {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Archive is in read-only mode.",
+            ));
+        }
+
+        todo!()
+    }
+
+    /// Get an entry in the archive by resource path.
+    pub fn get_entry(&self, name: &str) -> Option<&ZipEntry> {
+        self.entries.get(&fnv1a64_hash_string(&name.to_owned()))
+    }
+
+    /// Get an entry in the archive by hash (FNV1a64 of resource path).
+    pub fn get_entry_by_hash(&self, hash: &u64) -> Option<&ZipEntry> {
+        self.entries.get(hash)
+    }
+
+    // private methods
+
+    fn get_file_segment(&self, i: usize) -> Option<&FileSegment> {
+        self.internal_archive.index.file_segments.get(i)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ZipEntry {
+    /// FNV1a64 hash of the entry name
+    hash: u64,
+    /// Resolved resource path of that entry, this may not be available
+    name: Option<String>,
+
+    /// wrapped internal struct
+    entry: FileEntry,
+}
+
+impl ZipEntry {
+    fn new(hash: u64, name: Option<String>, entry: FileEntry) -> Self {
+        Self { hash, name, entry }
+    }
+
+    // getters
+
+    fn segments_start(&self) -> u32 {
+        self.entry.segments_start
+    }
+
+    fn segments_end(&self) -> u32 {
+        self.entry.segments_end
+    }
+
+    // methods
+    pub fn delete() {}
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -611,74 +823,6 @@ pub struct ZipArchive {
 struct Archive {
     header: Header,
     index: Index,
-
-    // custom
-    file_names: HashMap<u64, String>,
-}
-
-impl Archive {
-    // Function to read a Header from a file
-    fn from_file<P>(file_path: P) -> Result<Archive>
-    where
-        P: AsRef<Path>,
-    {
-        let mut file = File::open(file_path)?;
-        let mut buffer = Vec::with_capacity(mem::size_of::<Header>());
-        file.read_to_end(&mut buffer)?;
-
-        // Ensure that the buffer has enough bytes to represent a Header
-        if buffer.len() < mem::size_of::<Header>() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "File does not contain enough data to parse Header",
-            ));
-        }
-
-        let mut cursor = io::Cursor::new(&buffer);
-
-        Archive::from_reader(&mut cursor)
-    }
-
-    fn from_reader<R>(cursor: &mut R) -> Result<Archive>
-    where
-        R: Read + Seek,
-    {
-        let header = Header::from_reader(cursor)?;
-
-        // read custom data
-        let mut file_names: HashMap<u64, String> = HashMap::default();
-        if let Ok(custom_data_length) = cursor.read_u32::<LittleEndian>() {
-            if custom_data_length > 0 {
-                cursor.seek(io::SeekFrom::Start(Header::HEADER_EXTENDED_SIZE))?;
-                if let Ok(footer) = LxrsFooter::from_reader(cursor) {
-                    // add files to hashmap
-                    for f in footer.files {
-                        let hash = fnv1a64_hash_string(&f);
-                        file_names.insert(hash, f);
-                    }
-                }
-            }
-        }
-
-        // move to offset Header.IndexPosition
-        cursor.seek(io::SeekFrom::Start(header.index_position))?;
-        let index = Index::from_reader(cursor)?;
-
-        Ok(Archive {
-            header,
-            index,
-            file_names,
-        })
-    }
-
-    // get filehashes
-    fn get_file_hashes(&self) -> Vec<u64> {
-        self.index
-            .file_entries
-            .iter()
-            .map(|f| f.1.name_hash_64)
-            .collect::<Vec<_>>()
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -953,13 +1097,15 @@ impl FromReader for LxrsFooter {
 #[cfg(test)]
 mod integration_tests {
     use std::{
-        fs,
+        fs::{self, File},
         io::{self, Read},
         path::PathBuf,
     };
 
+    use crate::archive::{open_read, ArchiveMode, ZipArchive};
+
+    use super::FromReader;
     use super::LxrsFooter;
-    use super::{Archive, FromReader};
 
     #[test]
     fn read_srxl() {
@@ -976,25 +1122,29 @@ mod integration_tests {
     #[test]
     fn read_archive() {
         let archive_path = PathBuf::from("tests").join("test1.archive");
-        let result = Archive::from_file(archive_path);
+        let result = open_read(archive_path);
         assert!(result.is_ok());
     }
 
     #[test]
     fn read_archive2() {
         let archive_path = PathBuf::from("tests").join("nci.archive");
-        let result = Archive::from_file(archive_path);
+        let mut file = File::open(archive_path).expect("Could not parse archive");
+        let result = ZipArchive::from_reader(&mut file, ArchiveMode::Read);
         assert!(result.is_ok());
     }
 
     #[test]
     fn read_custom_data() {
         let archive_path = PathBuf::from("tests").join("test1.archive");
-        let archive = Archive::from_file(archive_path).expect("Could not parse archive");
+        let mut file = File::open(archive_path).expect("Could not parse archive");
+        let archive =
+            ZipArchive::from_reader(&mut file, ArchiveMode::Read).expect("Could not parse archive");
         let mut file_names = archive
-            .file_names
+            .entries
             .values()
-            .map(|f| f.to_owned())
+            .map(|f| f.name.to_owned())
+            .flatten()
             .collect::<Vec<_>>();
         file_names.sort();
 
