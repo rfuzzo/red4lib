@@ -7,8 +7,8 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     fs::{create_dir_all, File},
-    io::{self, BufWriter, Cursor, Read, Result, Seek, SeekFrom, Write},
-    path::Path,
+    io::{self, BufWriter, Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -178,33 +178,17 @@ where
     P: AsRef<Path>,
     W: Write + Seek,
 {
-    /*if !in_folder.exists() {
-        return Err(Error::new(ErrorKind::InvalidInput, ""));
-    }*/
+    if !in_folder.as_ref().exists() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Input folder does not exist",
+        ));
+    }
+    // get files
+    let resources = collect_resource_files(in_folder);
 
-    // collect files
-    let mut included_extensions = ERedExtension::iter()
-        .map(|variant| variant.to_string())
-        .collect::<Vec<_>>();
-    included_extensions.push(String::from("bin"));
-
-    // get only resource files
-    let allfiles = WalkDir::new(in_folder)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .map(|f| f.into_path())
-        .filter(|p| {
-            if let Some(ext) = p.extension() {
-                if let Some(ext) = ext.to_str() {
-                    return included_extensions.contains(&ext.to_owned());
-                }
-            }
-            false
-        })
-        .collect::<Vec<_>>();
-
-    // sort by hash
-    let mut hashed_paths = allfiles
+    // get paths and sort by hash
+    let mut file_info = resources
         .iter()
         .filter_map(|f| {
             if let Ok(relative_path) = f.strip_prefix(in_folder) {
@@ -216,22 +200,9 @@ where
             None
         })
         .collect::<Vec<_>>();
-    hashed_paths.sort_by_key(|k| k.1);
+    file_info.sort_by_key(|k| k.1);
 
-    let mut archive_writer = BufWriter::new(out_stream);
-
-    // write temp header
-    let mut archive = Archive::default();
-    let header = Header::default();
-    header.serialize(&mut archive_writer)?;
-    archive_writer.write_all(&[0u8; 132])?; // some weird padding
-
-    // write custom header
-    assert_eq!(
-        Header::HEADER_EXTENDED_SIZE,
-        archive_writer.stream_position()?
-    );
-    let custom_paths = hashed_paths
+    let custom_paths = file_info
         .iter()
         .filter(|(_p, k)| hash_map.contains_key(k))
         .filter_map(|(f, _h)| {
@@ -242,18 +213,31 @@ where
         })
         .collect::<Vec<_>>();
 
+    // start write
+
+    let mut archive_writer = BufWriter::new(out_stream);
+
+    // write empty header
+    let header = Header::default();
+    header.serialize(&mut archive_writer)?;
+    archive_writer.write_all(&[0u8; 132])?; // padding
+
+    // write custom header
     let mut custom_data_length = 0;
     if !custom_paths.is_empty() {
         let wfooter = LxrsFooter {
             files: custom_paths,
         };
-        wfooter.serialize(&mut archive_writer)?;
+        wfooter.write(&mut archive_writer)?;
         custom_data_length = archive_writer.stream_position()? - Header::HEADER_EXTENDED_SIZE;
     }
 
     // write files
+    let mut file_segments_cnt = 0;
+    let mut entries = HashMap::default();
     let mut imports_hash_set: HashSet<String> = HashSet::new();
-    for (path, hash) in hashed_paths {
+
+    for (path, hash) in file_info {
         // read file
         let mut file = File::open(&path)?;
         let mut file_buffer = Vec::new();
@@ -261,11 +245,14 @@ where
 
         let firstimportidx = imports_hash_set.len();
         let mut lastimportidx = imports_hash_set.len();
-        let firstoffsetidx = archive.index.file_segments.len();
+        let firstoffsetidx = file_segments_cnt;
         let mut lastoffsetidx = 0;
         let mut flags = 0;
 
         let mut file_cursor = Cursor::new(&file_buffer);
+        let mut segment: Option<FileSegment> = None;
+        let mut buffers = vec![];
+
         if let Ok(info) = read_cr2w_header(&mut file_cursor) {
             // get main file
             file_cursor.seek(SeekFrom::Start(0))?;
@@ -293,11 +280,12 @@ where
             archive_writer.write_all(&compressed_buffer)?;
 
             // add metadata to archive
-            archive.index.file_segments.push(FileSegment {
+            segment = Some(FileSegment {
                 offset: archive_offset,
                 size,
                 z_size: zsize as u32,
             });
+            file_segments_cnt += 1;
 
             // write buffers (bytes after the main file)
             for buffer_info in info.buffers_table.iter() {
@@ -310,11 +298,12 @@ where
                 archive_writer.write_all(buffer.as_slice())?;
 
                 // add metadata to archive
-                archive.index.file_segments.push(FileSegment {
+                buffers.push(FileSegment {
                     offset: boffset,
                     size: bsize,
                     z_size: bzsize,
                 });
+                file_segments_cnt += 1;
             }
 
             //register imports
@@ -325,7 +314,7 @@ where
             }
 
             lastimportidx = imports_hash_set.len();
-            lastoffsetidx = archive.index.file_segments.len();
+            lastoffsetidx = file_segments_cnt;
             flags = if !info.buffers_table.is_empty() {
                 info.buffers_table.len() - 1
             } else {
@@ -342,10 +331,11 @@ where
 
                 let offset = archive_writer.stream_position()?;
                 let size = file_buffer.len() as u32;
-                let mut final_zsize = file_buffer.len() as u32;
+                let final_zsize;
                 if get_uncompressed_file_extensions().contains(&ext) {
                     // direct copy
                     archive_writer.write_all(&file_buffer)?;
+                    final_zsize = size;
                 } else {
                     // kark file
                     let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
@@ -363,11 +353,12 @@ where
                 }
 
                 // add metadata to archive
-                archive.index.file_segments.push(FileSegment {
+                segment = Some(FileSegment {
                     offset,
                     size,
                     z_size: final_zsize,
                 });
+                file_segments_cnt += 1;
             }
         }
 
@@ -384,16 +375,39 @@ where
             resource_dependencies_end: lastimportidx as u32,
             sha1_hash,
         };
-        archive.index.file_entries.insert(hash, entry);
+
+        if let Some(segment) = segment {
+            let wrapped_entry = ZipEntry {
+                hash,
+                name: None,
+                entry,
+                segment,
+                buffers,
+            };
+            entries.insert(hash, wrapped_entry);
+        }
     }
 
     // write footers
+    let archive = ZipArchive {
+        stream: todo!(),
+        mode: ArchiveMode::Create,
+        entries,
+        dirty: false,
+        dependencies: imports_hash_set
+            .iter()
+            .map(|e| Dependency {
+                hash: fnv1a64_hash_string(e),
+            })
+            .collect::<Vec<_>>(),
+    };
+
     // padding
     pad_until_page(&mut archive_writer)?;
 
     // write tables
     let tableoffset = archive_writer.stream_position()?;
-    archive.index.serialize(&mut archive_writer)?;
+    archive.write_index(&mut archive_writer)?;
     let tablesize = archive_writer.stream_position()? - tableoffset;
 
     // padding
@@ -401,14 +415,38 @@ where
     let filesize = archive_writer.stream_position()?;
 
     // write the header again
-    archive.header.index_position = tableoffset;
-    archive.header.index_size = tablesize as u32;
-    archive.header.filesize = filesize;
+    header.index_position = tableoffset;
+    header.index_size = tablesize as u32;
+    header.filesize = filesize;
     archive_writer.seek(SeekFrom::Start(0))?;
-    archive.header.serialize(&mut archive_writer)?;
+    header.serialize(&mut archive_writer)?;
     archive_writer.write_u32::<LittleEndian>(custom_data_length as u32)?;
 
     Ok(())
+}
+
+fn collect_resource_files<P: AsRef<Path>>(in_folder: &P) -> Vec<PathBuf> {
+    // collect files
+    let mut included_extensions = ERedExtension::iter()
+        .map(|variant| variant.to_string())
+        .collect::<Vec<_>>();
+    included_extensions.push(String::from("bin"));
+
+    // get only resource files
+    let allfiles = WalkDir::new(in_folder)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(|f| f.into_path())
+        .filter(|p| {
+            if let Some(ext) = p.extension() {
+                if let Some(ext) = ext.to_str() {
+                    return included_extensions.contains(&ext.to_owned());
+                }
+            }
+            false
+        })
+        .collect::<Vec<_>>();
+    allfiles
 }
 
 /// Decompresses and writes a kraken-compressed segment from an archive to a stream
@@ -494,15 +532,24 @@ pub enum ArchiveMode {
 
 #[derive(Debug)]
 pub struct ZipArchive<S> {
-    /// wraps an Archive internally
-    internal_archive: Archive,
     /// wraps a stream
     stream: S,
 
     /// The read-write mode of the archive
     mode: ArchiveMode,
+    dirty: bool,
     /// The files inside an archive
     entries: HashMap<u64, ZipEntry>,
+    dependencies: Vec<Dependency>,
+}
+
+impl<S> Drop for ZipArchive<S> {
+    fn drop(&mut self) {
+        // in update mode, we write on drop
+        if self.mode == ArchiveMode::Update {
+            todo!()
+        }
+    }
 }
 
 impl<S> ZipArchive<S> {
@@ -515,14 +562,7 @@ impl<S> ZipArchive<S> {
     pub fn get_entry_by_hash(&self, hash: &u64) -> Option<&ZipEntry> {
         self.entries.get(hash)
     }
-
-    // private methods
-    fn get_file_segment(&self, i: usize) -> Option<&FileSegment> {
-        self.internal_archive.index.file_segments.get(i)
-    }
 }
-
-type EntryExtractInfo = (String, FileSegment, Vec<FileSegment>);
 
 impl<R> ZipArchive<R>
 where
@@ -540,7 +580,7 @@ where
         overwrite_files: bool,
         hash_map: &HashMap<u64, String>,
     ) -> Result<()> {
-        let Some(info) = self.get_extract_info(&entry, &hash_map) else {
+        let Some(info) = entry.get_resolved_name(&hash_map) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Could not get entry info from archive.",
@@ -548,7 +588,7 @@ where
         };
 
         // name or hash is a relative path
-        let outfile = destination_directory_name.as_ref().join(info.0);
+        let outfile = destination_directory_name.as_ref().join(info);
         create_dir_all(outfile.parent().expect("Could not create an out_dir"))?;
 
         // extract to stream
@@ -563,7 +603,7 @@ where
         };
 
         let writer = BufWriter::new(&mut fs);
-        self.extract_segments(info.1, info.2, writer)?;
+        self.extract_segments(&entry, writer)?;
 
         Ok(())
     }
@@ -623,22 +663,8 @@ where
     }
 
     /// Returns an open read stream to an entry of this [`ZipArchive<R>`].
-    pub fn open_entry<W: Write>(
-        &mut self,
-        entry: ZipEntry,
-        hash_map: &HashMap<u64, String>,
-        writer: W,
-    ) -> Result<()> {
-        let Some(info) = self.get_extract_info(&entry, &hash_map) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Could not get entry info from archive.",
-            ));
-        };
-
-        let segment = info.1;
-        let buffers = info.2;
-        self.extract_segments(segment, buffers, writer)?;
+    pub fn open_entry<W: Write>(&mut self, entry: ZipEntry, writer: W) -> Result<()> {
+        self.extract_segments(&entry, writer)?;
 
         Ok(())
     }
@@ -691,12 +717,10 @@ where
     /// # Errors
     ///
     /// This function will return an error if io fails
-    fn extract_segments<W: Write>(
-        &mut self,
-        segment: FileSegment,
-        buffers: Vec<FileSegment>,
-        mut writer: W,
-    ) -> Result<()> {
+    fn extract_segments<W: Write>(&mut self, entry: &ZipEntry, mut writer: W) -> Result<()> {
+        let segment = entry.segment;
+        let buffers = entry.buffers.clone();
+
         if segment.size == segment.z_size {
             // just copy
             self.reader_mut().seek(SeekFrom::Start(segment.offset))?;
@@ -716,49 +740,16 @@ where
         Ok(())
     }
 
-    /// Gets offset info from the underlying archive for a given entry.
-    fn get_extract_info(
-        &self,
-        file_entry: &ZipEntry,
-        hash_map: &HashMap<u64, String>,
-    ) -> Option<(String, FileSegment, Vec<FileSegment>)> {
-        // get filename
-        let resolved = if let Some(name) = &file_entry.name {
-            name.to_owned()
-        } else {
-            let mut name_or_hash: String = format!("{}.bin", file_entry.hash);
-            // check vanilla hashes
-            if let Some(name) = hash_map.get(&file_entry.hash) {
-                name_or_hash = name.to_owned();
-            }
-            name_or_hash
-        };
-
-        let start_index = file_entry.segments_start();
-        let next_index = file_entry.segments_end();
-        let mut info: Option<EntryExtractInfo> = None;
-        if let Some(segment) = self.get_file_segment(start_index as usize) {
-            let mut buffers: Vec<FileSegment> = vec![];
-            for i in start_index + 1..next_index {
-                if let Some(segment) = self.get_file_segment(i as usize) {
-                    buffers.push(*segment);
-                }
-            }
-
-            info = Some((resolved, *segment, buffers));
-        }
-        info
-    }
-
     /// Opens an archive, needs to be read-only
     fn from_reader_consume(mut reader: R, mode: ArchiveMode) -> Result<ZipArchive<R>> {
         // checks
         if mode == ArchiveMode::Create {
             return Ok(ZipArchive::<R> {
                 stream: reader,
-                internal_archive: Archive::default(),
                 mode,
+                dirty: true,
                 entries: HashMap::default(),
+                dependencies: Vec::default(),
             });
         }
 
@@ -785,34 +776,122 @@ where
         reader.seek(io::SeekFrom::Start(header.index_position))?;
         let index = Index::from_reader(&mut reader)?;
 
+        // read tables
+        let mut file_entries: HashMap<u64, FileEntry> = HashMap::default();
+        for _i in 0..index.file_entry_count {
+            let entry = FileEntry::from_reader(&mut reader)?;
+            file_entries.insert(entry.name_hash_64, entry);
+        }
+
+        let mut file_segments = Vec::default();
+        for _i in 0..index.file_segment_count {
+            file_segments.push(FileSegment::from_reader(&mut reader)?);
+        }
+
+        // dependencies can't be connected to individual files anymore
+        let mut dependencies = Vec::default();
+        for _i in 0..index.resource_dependency_count {
+            dependencies.push(Dependency::from_reader(&mut reader)?);
+        }
+
         // construct wrapper
-        let internal_archive = Archive { header, index };
-        let mut entries: HashMap<u64, ZipEntry> = HashMap::default();
-        for (hash, entry) in internal_archive.index.file_entries.iter() {
+        let mut entries = HashMap::default();
+        for (hash, entry) in file_entries.iter() {
             let resolved = if let Some(name) = file_names.get(hash) {
                 Some(name.to_owned())
             } else {
                 None
             };
 
-            let zip_entry = ZipEntry {
-                hash: *hash,
-                name: resolved,
-                entry: *entry,
-            };
-            entries.insert(*hash, zip_entry);
+            let start_index = entry.segments_start;
+            let next_index = entry.segments_end;
+            if let Some(segment) = file_segments.get(start_index as usize) {
+                let mut buffers: Vec<FileSegment> = vec![];
+                for i in start_index + 1..next_index {
+                    if let Some(buffer) = file_segments.get(i as usize) {
+                        buffers.push(*buffer);
+                    }
+                }
+
+                let zip_entry = ZipEntry {
+                    hash: *hash,
+                    name: resolved,
+                    entry: *entry,
+                    segment: *segment,
+                    buffers,
+                };
+                entries.insert(*hash, zip_entry);
+            }
         }
 
-        Ok(ZipArchive::<R> {
+        let archive = ZipArchive::<R> {
             stream: reader,
-            internal_archive,
             mode,
             entries,
-        })
+            dependencies,
+            dirty: false,
+        };
+        Ok(archive)
     }
 }
 
 impl<W: Write + Seek> ZipArchive<W> {
+    fn write(&mut self) {
+        todo!()
+    }
+
+    fn write_index(&mut self, writer: &mut W) -> Result<()> {
+        let file_entry_count = self.entries.len() as u32;
+        let buffer_counts = self.entries.iter().map(|e| e.1.buffers.len() + 1);
+        let file_segment_count = buffer_counts.sum::<usize>() as u32;
+        let resource_dependency_count = self.dependencies.len() as u32;
+
+        // todo write table to buffer
+        let mut buffer: Vec<u8> = Vec::new();
+        //let mut table_writer = Cursor::new(buffer);
+        buffer.write_u32::<LittleEndian>(file_entry_count)?;
+        buffer.write_u32::<LittleEndian>(file_segment_count)?;
+        buffer.write_u32::<LittleEndian>(resource_dependency_count)?;
+        let mut entries = self.entries.values().collect::<Vec<_>>();
+        entries.sort_by_key(|e| e.hash);
+        // write entries
+        let mut segments = Vec::default();
+        for entry in entries {
+            entry.entry.write(&mut buffer)?;
+            // collect offsets
+            segments.push(entry.segment);
+            for buffer in &entry.buffers {
+                segments.push(buffer.clone());
+            }
+        }
+        // write segments
+        for segment in segments {
+            segment.write(&mut buffer)?;
+        }
+
+        // write dependencies
+        for dependency in &self.dependencies {
+            dependency.write(&mut buffer)?;
+        }
+
+        // write to out stream
+        let crc = crc64::crc64(0, buffer.as_slice());
+        let index = Index {
+            file_table_offset: 8,
+            file_table_size: buffer.len() as u32 + 8,
+            crc,
+            file_entry_count,
+            file_segment_count,
+            resource_dependency_count,
+        };
+        writer.write_u32::<LittleEndian>(index.file_table_offset)?;
+        writer.write_u32::<LittleEndian>(index.file_table_size)?;
+        writer.write_u64::<LittleEndian>(index.crc)?;
+        writer.write_all(buffer.as_slice())?;
+
+        Ok(())
+    }
+
     /// Compresses and adds a file to the archive.
     ///
     /// # Errors
@@ -823,22 +902,38 @@ impl<W: Write + Seek> ZipArchive<W> {
         _file_path: P,
         _compression_level: CompressionLevel,
     ) -> Result<ZipEntry> {
-        if self.mode == ArchiveMode::Read {
+        // can only add entries in update mode
+        if self.mode != ArchiveMode::Update {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Archive is in read-only mode.",
             ));
         }
 
+        // todo write?
+
+        // update offsets?
+
         todo!()
     }
 
     /// Deletes an entry from the archive
-    pub fn delete_entry(&mut self, hash: &u64) -> Option<ZipEntry> {
-        let removed = self.entries.remove(hash);
+    pub fn delete_entry(&mut self, hash: &u64) -> Result<ZipEntry> {
+        // can only delete entries in update mode
+        if self.mode != ArchiveMode::Update {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Archive is in read-only mode.",
+            ));
+        }
+
+        // update internally
+        let _removed = self.entries.remove(hash);
+
+        todo!()
 
         // todo write? update offsets?
-        removed
+        //removed
     }
 }
 
@@ -851,28 +946,31 @@ pub struct ZipEntry {
 
     /// wrapped internal struct
     entry: FileEntry,
+    segment: FileSegment,
+    buffers: Vec<FileSegment>,
 }
 
 impl ZipEntry {
-    // getters
-    fn segments_start(&self) -> u32 {
-        self.entry.segments_start
-    }
+    fn get_resolved_name(&self, hash_map: &HashMap<u64, String>) -> Option<String> {
+        // get filename
+        let resolved = if let Some(name) = &self.name {
+            name.to_owned()
+        } else {
+            let mut name_or_hash: String = format!("{}.bin", self.hash);
+            // check vanilla hashes
+            if let Some(name) = hash_map.get(&self.hash) {
+                name_or_hash = name.to_owned();
+            }
+            name_or_hash
+        };
 
-    fn segments_end(&self) -> u32 {
-        self.entry.segments_end
+        Some(resolved)
     }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // INTERNAL
 /////////////////////////////////////////////////////////////////////////////////////////
-
-#[derive(Debug, Clone, Default)]
-struct Archive {
-    header: Header,
-    index: Index,
-}
 
 #[derive(Debug, Clone, Copy)]
 struct Header {
@@ -932,62 +1030,28 @@ impl Header {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Index {
+    /// Offset from the beginning of this struct, should be 8
     file_table_offset: u32,
+    /// byte size of the table
     file_table_size: u32,
     crc: u64,
     file_entry_count: u32,
     file_segment_count: u32,
     resource_dependency_count: u32,
-
-    // not serialized
-    file_entries: HashMap<u64, FileEntry>,
-    file_segments: Vec<FileSegment>,
-    dependencies: Vec<Dependency>,
 }
-impl Index {
-    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u32::<LittleEndian>(self.file_table_offset)?;
-        writer.write_u32::<LittleEndian>(self.file_table_size)?;
-        writer.write_u64::<LittleEndian>(self.crc)?;
-        writer.write_u32::<LittleEndian>(self.file_entry_count)?;
-        writer.write_u32::<LittleEndian>(self.file_segment_count)?;
-        writer.write_u32::<LittleEndian>(self.resource_dependency_count)?;
-
-        Ok(())
-    }
-}
+impl Index {}
 impl FromReader for Index {
     fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self> {
-        let mut index = Index {
+        let index = Index {
             file_table_offset: cursor.read_u32::<LittleEndian>()?,
             file_table_size: cursor.read_u32::<LittleEndian>()?,
             crc: cursor.read_u64::<LittleEndian>()?,
             file_entry_count: cursor.read_u32::<LittleEndian>()?,
             file_segment_count: cursor.read_u32::<LittleEndian>()?,
             resource_dependency_count: cursor.read_u32::<LittleEndian>()?,
-
-            file_entries: HashMap::default(),
-            file_segments: vec![],
-            dependencies: vec![],
         };
-
-        // read tables
-        for _i in 0..index.file_entry_count {
-            let entry = FileEntry::from_reader(cursor)?;
-            index.file_entries.insert(entry.name_hash_64, entry);
-        }
-
-        for _i in 0..index.file_segment_count {
-            index.file_segments.push(FileSegment::from_reader(cursor)?);
-        }
-
-        for _i in 0..index.resource_dependency_count {
-            index.dependencies.push(Dependency::from_reader(cursor)?);
-        }
-
-        // ignore the rest of the archive
 
         Ok(index)
     }
@@ -1000,6 +1064,15 @@ struct FileSegment {
     size: u32,
 }
 
+impl FileSegment {
+    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_u64::<LittleEndian>(self.offset)?;
+        writer.write_u32::<LittleEndian>(self.z_size)?;
+        writer.write_u32::<LittleEndian>(self.size)?;
+        Ok(())
+    }
+}
+
 impl FromReader for FileSegment {
     fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
         Ok(FileSegment {
@@ -1009,7 +1082,6 @@ impl FromReader for FileSegment {
         })
     }
 }
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct FileEntry {
     name_hash_64: u64,
@@ -1021,7 +1093,20 @@ struct FileEntry {
     resource_dependencies_end: u32,
     sha1_hash: [u8; 20],
 }
-#[warn(dead_code)]
+
+impl FileEntry {
+    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_u64::<LittleEndian>(self.name_hash_64)?;
+        writer.write_u64::<LittleEndian>(self.timestamp)?;
+        writer.write_u32::<LittleEndian>(self.num_inline_buffer_segments)?;
+        writer.write_u32::<LittleEndian>(self.segments_start)?;
+        writer.write_u32::<LittleEndian>(self.segments_end)?;
+        writer.write_u32::<LittleEndian>(self.resource_dependencies_start)?;
+        writer.write_u32::<LittleEndian>(self.resource_dependencies_end)?;
+        writer.write_all(self.sha1_hash.as_slice())?;
+        Ok(())
+    }
+}
 
 impl FromReader for FileEntry {
     fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
@@ -1047,6 +1132,13 @@ impl FromReader for FileEntry {
 struct Dependency {
     hash: u64,
 }
+
+impl Dependency {
+    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_u64::<LittleEndian>(self.hash)?;
+        Ok(())
+    }
+}
 #[warn(dead_code)]
 
 impl FromReader for Dependency {
@@ -1067,7 +1159,7 @@ impl LxrsFooter {
     const MAGIC: u32 = 0x4C585253;
     const VERSION: u32 = 1;
 
-    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<LittleEndian>(self.files.len() as u32)?;
         writer.write_u32::<LittleEndian>(LxrsFooter::VERSION)?;
 
