@@ -4,7 +4,6 @@
 
 use std::{
     borrow::BorrowMut,
-    cmp::Ordering,
     collections::{HashMap, HashSet},
     fs::{create_dir_all, File},
     io::{self, BufWriter, Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write},
@@ -15,10 +14,18 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use strum::IntoEnumIterator;
 use walkdir::WalkDir;
 
-use crate::fnv1a64_hash_string;
-use crate::io::*;
 use crate::kraken::*;
 use crate::{cr2w::*, *};
+use crate::{fnv1a64_hash_string, io::FromReader};
+
+use self::{dependency::*, file_entry::*, file_segment::*, header::*, index::*, lxrs::*};
+
+mod dependency;
+mod file_entry;
+mod file_segment;
+mod header;
+mod index;
+mod lxrs;
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // ARCHIVE_FILE
@@ -218,16 +225,13 @@ where
     let mut archive_writer = BufWriter::new(out_stream);
 
     // write empty header
-    let header = Header::default();
-    header.serialize(&mut archive_writer)?;
+    archive_writer.write_all(&[0u8; Header::HEADER_SIZE])?; //write empty header
     archive_writer.write_all(&[0u8; 132])?; // padding
 
     // write custom header
     let mut custom_data_length = 0;
     if !custom_paths.is_empty() {
-        let wfooter = LxrsFooter {
-            files: custom_paths,
-        };
+        let wfooter = LxrsFooter::new(custom_paths);
         wfooter.write(&mut archive_writer)?;
         custom_data_length = archive_writer.stream_position()? - Header::HEADER_EXTENDED_SIZE;
     }
@@ -280,11 +284,7 @@ where
             archive_writer.write_all(&compressed_buffer)?;
 
             // add metadata to archive
-            segment = Some(FileSegment {
-                offset: archive_offset,
-                size,
-                z_size: zsize as u32,
-            });
+            segment = Some(FileSegment::new(archive_offset, zsize as u32, size));
             file_segments_cnt += 1;
 
             // write buffers (bytes after the main file)
@@ -298,11 +298,7 @@ where
                 archive_writer.write_all(buffer.as_slice())?;
 
                 // add metadata to archive
-                buffers.push(FileSegment {
-                    offset: boffset,
-                    size: bsize,
-                    z_size: bzsize,
-                });
+                buffers.push(FileSegment::new(boffset, bzsize, bsize));
                 file_segments_cnt += 1;
             }
 
@@ -353,11 +349,7 @@ where
                 }
 
                 // add metadata to archive
-                segment = Some(FileSegment {
-                    offset,
-                    size,
-                    z_size: final_zsize,
-                });
+                segment = Some(FileSegment::new(offset, final_zsize, size));
                 file_segments_cnt += 1;
             }
         }
@@ -365,16 +357,16 @@ where
         // update archive metadata
         let sha1_hash = sha1_hash_file(&file_buffer);
 
-        let entry = FileEntry {
-            name_hash_64: hash,
-            timestamp: 0, // TODO proper timestamps
-            num_inline_buffer_segments: flags as u32,
-            segments_start: firstoffsetidx as u32,
-            segments_end: lastoffsetidx as u32,
-            resource_dependencies_start: firstimportidx as u32,
-            resource_dependencies_end: lastimportidx as u32,
+        let entry = FileEntry::new(
+            hash,
+            0,
+            flags as u32,
+            firstoffsetidx as u32,
+            lastoffsetidx as u32,
+            firstimportidx as u32,
+            lastimportidx as u32,
             sha1_hash,
-        };
+        );
 
         if let Some(segment) = segment {
             let wrapped_entry = ZipEntry {
@@ -389,37 +381,27 @@ where
     }
 
     // write footers
-    let archive = ZipArchive {
-        stream: todo!(),
-        mode: ArchiveMode::Create,
-        entries,
-        dirty: false,
-        dependencies: imports_hash_set
-            .iter()
-            .map(|e| Dependency {
-                hash: fnv1a64_hash_string(e),
-            })
-            .collect::<Vec<_>>(),
-    };
+    let dependencies = imports_hash_set
+        .iter()
+        .map(|e| Dependency::new(fnv1a64_hash_string(e)))
+        .collect::<Vec<_>>();
 
     // padding
     pad_until_page(&mut archive_writer)?;
 
     // write tables
     let tableoffset = archive_writer.stream_position()?;
-    archive.write_index(&mut archive_writer)?;
+    write_index(&mut archive_writer, &entries, &dependencies)?;
     let tablesize = archive_writer.stream_position()? - tableoffset;
 
     // padding
     pad_until_page(&mut archive_writer)?;
-    let filesize = archive_writer.stream_position()?;
 
     // write the header again
-    header.index_position = tableoffset;
-    header.index_size = tablesize as u32;
-    header.filesize = filesize;
+    let filesize = archive_writer.stream_position()?;
+    let header = Header::new(tableoffset, tablesize as u32, 0, 0, filesize);
     archive_writer.seek(SeekFrom::Start(0))?;
-    header.serialize(&mut archive_writer)?;
+    header.write(&mut archive_writer)?;
     archive_writer.write_u32::<LittleEndian>(custom_data_length as u32)?;
 
     Ok(())
@@ -459,17 +441,17 @@ fn decompress_segment<R: Read + Seek, W: Write>(
     segment: &FileSegment,
     file_writer: &mut W,
 ) -> Result<()> {
-    archive_reader.seek(SeekFrom::Start(segment.offset))?;
+    archive_reader.seek(SeekFrom::Start(segment.offset()))?;
 
     let magic = archive_reader.read_u32::<LittleEndian>()?;
     if magic == kraken::MAGIC {
         // read metadata
-        let mut size = segment.size;
+        let mut size = segment.size();
         let size_in_header = archive_reader.read_u32::<LittleEndian>()?;
         if size_in_header != size {
             size = size_in_header;
         }
-        let mut compressed_buffer = vec![0; segment.z_size as usize - 8];
+        let mut compressed_buffer = vec![0; segment.z_size() as usize - 8];
         archive_reader.read_exact(&mut compressed_buffer[..])?;
         let mut output_buffer = vec![];
         let result = decompress(compressed_buffer, &mut output_buffer, size as usize);
@@ -479,8 +461,8 @@ fn decompress_segment<R: Read + Seek, W: Write>(
         file_writer.write_all(&output_buffer)?;
     } else {
         // incorrect data, fall back to direct copy
-        archive_reader.seek(SeekFrom::Start(segment.offset))?;
-        let mut buffer = vec![0; segment.z_size as usize];
+        archive_reader.seek(SeekFrom::Start(segment.offset()))?;
+        let mut buffer = vec![0; segment.z_size() as usize];
         archive_reader.read_exact(&mut buffer[..])?;
         file_writer.write_all(&buffer)?;
     };
@@ -721,18 +703,18 @@ where
         let segment = entry.segment;
         let buffers = entry.buffers.clone();
 
-        if segment.size == segment.z_size {
+        if segment.size() == segment.z_size() {
             // just copy
-            self.reader_mut().seek(SeekFrom::Start(segment.offset))?;
-            let mut buffer = vec![0; segment.z_size as usize];
+            self.reader_mut().seek(SeekFrom::Start(segment.offset()))?;
+            let mut buffer = vec![0; segment.z_size() as usize];
             self.reader_mut().read_exact(&mut buffer[..])?;
             writer.write_all(&buffer)?;
         } else {
             decompress_segment(self.reader_mut(), &segment, &mut writer)?;
         }
         for segment in buffers {
-            self.reader_mut().seek(SeekFrom::Start(segment.offset))?;
-            let mut buffer = vec![0; segment.z_size as usize];
+            self.reader_mut().seek(SeekFrom::Start(segment.offset()))?;
+            let mut buffer = vec![0; segment.z_size() as usize];
             self.reader_mut().read_exact(&mut buffer[..])?;
             writer.write_all(&buffer)?;
         }
@@ -763,9 +745,9 @@ where
                 reader.seek(io::SeekFrom::Start(Header::HEADER_EXTENDED_SIZE))?;
                 if let Ok(footer) = LxrsFooter::from_reader(&mut reader) {
                     // add files to hashmap
-                    for f in footer.files {
-                        let hash = fnv1a64_hash_string(&f);
-                        file_names.insert(hash, f);
+                    for f in footer.files() {
+                        let hash = fnv1a64_hash_string(f);
+                        file_names.insert(hash, f.to_owned());
                     }
                 }
             }
@@ -773,24 +755,24 @@ where
 
         // read index
         // move to offset Header.IndexPosition
-        reader.seek(io::SeekFrom::Start(header.index_position))?;
+        reader.seek(io::SeekFrom::Start(header.index_position()))?;
         let index = Index::from_reader(&mut reader)?;
 
         // read tables
         let mut file_entries: HashMap<u64, FileEntry> = HashMap::default();
-        for _i in 0..index.file_entry_count {
+        for _i in 0..index.file_entry_count() {
             let entry = FileEntry::from_reader(&mut reader)?;
-            file_entries.insert(entry.name_hash_64, entry);
+            file_entries.insert(entry.name_hash_64(), entry);
         }
 
         let mut file_segments = Vec::default();
-        for _i in 0..index.file_segment_count {
+        for _i in 0..index.file_segment_count() {
             file_segments.push(FileSegment::from_reader(&mut reader)?);
         }
 
         // dependencies can't be connected to individual files anymore
         let mut dependencies = Vec::default();
-        for _i in 0..index.resource_dependency_count {
+        for _i in 0..index.resource_dependency_count() {
             dependencies.push(Dependency::from_reader(&mut reader)?);
         }
 
@@ -803,8 +785,8 @@ where
                 None
             };
 
-            let start_index = entry.segments_start;
-            let next_index = entry.segments_end;
+            let start_index = entry.segments_start();
+            let next_index = entry.segments_end();
             if let Some(segment) = file_segments.get(start_index as usize) {
                 let mut buffers: Vec<FileSegment> = vec![];
                 for i in start_index + 1..next_index {
@@ -838,58 +820,6 @@ where
 impl<W: Write + Seek> ZipArchive<W> {
     fn write(&mut self) {
         todo!()
-    }
-
-    fn write_index(&mut self, writer: &mut W) -> Result<()> {
-        let file_entry_count = self.entries.len() as u32;
-        let buffer_counts = self.entries.iter().map(|e| e.1.buffers.len() + 1);
-        let file_segment_count = buffer_counts.sum::<usize>() as u32;
-        let resource_dependency_count = self.dependencies.len() as u32;
-
-        // todo write table to buffer
-        let mut buffer: Vec<u8> = Vec::new();
-        //let mut table_writer = Cursor::new(buffer);
-        buffer.write_u32::<LittleEndian>(file_entry_count)?;
-        buffer.write_u32::<LittleEndian>(file_segment_count)?;
-        buffer.write_u32::<LittleEndian>(resource_dependency_count)?;
-        let mut entries = self.entries.values().collect::<Vec<_>>();
-        entries.sort_by_key(|e| e.hash);
-        // write entries
-        let mut segments = Vec::default();
-        for entry in entries {
-            entry.entry.write(&mut buffer)?;
-            // collect offsets
-            segments.push(entry.segment);
-            for buffer in &entry.buffers {
-                segments.push(buffer.clone());
-            }
-        }
-        // write segments
-        for segment in segments {
-            segment.write(&mut buffer)?;
-        }
-
-        // write dependencies
-        for dependency in &self.dependencies {
-            dependency.write(&mut buffer)?;
-        }
-
-        // write to out stream
-        let crc = crc64::crc64(0, buffer.as_slice());
-        let index = Index {
-            file_table_offset: 8,
-            file_table_size: buffer.len() as u32 + 8,
-            crc,
-            file_entry_count,
-            file_segment_count,
-            resource_dependency_count,
-        };
-        writer.write_u32::<LittleEndian>(index.file_table_offset)?;
-        writer.write_u32::<LittleEndian>(index.file_table_size)?;
-        writer.write_u64::<LittleEndian>(index.crc)?;
-        writer.write_all(buffer.as_slice())?;
-
-        Ok(())
     }
 
     /// Compresses and adds a file to the archive.
@@ -972,266 +902,52 @@ impl ZipEntry {
 // INTERNAL
 /////////////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Debug, Clone, Copy)]
-struct Header {
-    magic: u32,
-    version: u32,
-    index_position: u64,
-    index_size: u32,
-    debug_position: u64,
-    debug_size: u32,
-    filesize: u64,
-}
+fn write_index<W: Write>(
+    writer: &mut W,
+    entries: &HashMap<u64, ZipEntry>,
+    dependencies: &[Dependency],
+) -> Result<()> {
+    let file_entry_count = entries.len() as u32;
+    let buffer_counts = entries.iter().map(|e| e.1.buffers.len() + 1);
+    let file_segment_count = buffer_counts.sum::<usize>() as u32;
+    let resource_dependency_count = dependencies.len() as u32;
 
-impl Header {
-    //static HEADER_MAGIC: u32 = 1380009042;
-    //static HEADER_SIZE: i32 = 40;
-    const HEADER_EXTENDED_SIZE: u64 = 0xAC;
-}
-
-impl Default for Header {
-    fn default() -> Self {
-        Self {
-            magic: 1380009042,
-            version: 12,
-            index_position: Default::default(),
-            index_size: Default::default(),
-            debug_position: Default::default(),
-            debug_size: Default::default(),
-            filesize: Default::default(),
+    // todo write table to buffer
+    let mut buffer: Vec<u8> = Vec::new();
+    //let mut table_writer = Cursor::new(buffer);
+    buffer.write_u32::<LittleEndian>(file_entry_count)?;
+    buffer.write_u32::<LittleEndian>(file_segment_count)?;
+    buffer.write_u32::<LittleEndian>(resource_dependency_count)?;
+    let mut entries = entries.values().collect::<Vec<_>>();
+    entries.sort_by_key(|e| e.hash);
+    // write entries
+    let mut segments = Vec::default();
+    for entry in entries {
+        entry.entry.write(&mut buffer)?;
+        // collect offsets
+        segments.push(entry.segment);
+        for buffer in &entry.buffers {
+            segments.push(buffer.clone());
         }
     }
-}
-
-impl FromReader for Header {
-    fn from_reader<R: Read>(reader: &mut R) -> Result<Self> {
-        Ok(Header {
-            magic: reader.read_u32::<LittleEndian>()?,
-            version: reader.read_u32::<LittleEndian>()?,
-            index_position: reader.read_u64::<LittleEndian>()?,
-            index_size: reader.read_u32::<LittleEndian>()?,
-            debug_position: reader.read_u64::<LittleEndian>()?,
-            debug_size: reader.read_u32::<LittleEndian>()?,
-            filesize: reader.read_u64::<LittleEndian>()?,
-        })
+    // write segments
+    for segment in segments {
+        segment.write(&mut buffer)?;
     }
-}
-impl Header {
-    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u32::<LittleEndian>(self.magic)?;
-        writer.write_u32::<LittleEndian>(self.version)?;
-        writer.write_u64::<LittleEndian>(self.index_position)?;
-        writer.write_u32::<LittleEndian>(self.index_size)?;
-        writer.write_u64::<LittleEndian>(self.debug_position)?;
-        writer.write_u32::<LittleEndian>(self.debug_size)?;
-        writer.write_u64::<LittleEndian>(self.filesize)?;
 
-        Ok(())
+    // write dependencies
+    for dependency in dependencies {
+        dependency.write(&mut buffer)?;
     }
-}
 
-#[derive(Debug, Clone)]
-struct Index {
-    /// Offset from the beginning of this struct, should be 8
-    file_table_offset: u32,
-    /// byte size of the table
-    file_table_size: u32,
-    crc: u64,
-    file_entry_count: u32,
-    file_segment_count: u32,
-    resource_dependency_count: u32,
-}
-impl Index {}
-impl FromReader for Index {
-    fn from_reader<R: Read>(cursor: &mut R) -> io::Result<Self> {
-        let index = Index {
-            file_table_offset: cursor.read_u32::<LittleEndian>()?,
-            file_table_size: cursor.read_u32::<LittleEndian>()?,
-            crc: cursor.read_u64::<LittleEndian>()?,
-            file_entry_count: cursor.read_u32::<LittleEndian>()?,
-            file_segment_count: cursor.read_u32::<LittleEndian>()?,
-            resource_dependency_count: cursor.read_u32::<LittleEndian>()?,
-        };
+    // write to out stream
+    let crc = crc64::crc64(0, buffer.as_slice());
+    writer.write_u32::<LittleEndian>(8)?;
+    writer.write_u32::<LittleEndian>(buffer.len() as u32 + 8)?;
+    writer.write_u64::<LittleEndian>(crc)?;
+    writer.write_all(buffer.as_slice())?;
 
-        Ok(index)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FileSegment {
-    offset: u64,
-    z_size: u32,
-    size: u32,
-}
-
-impl FileSegment {
-    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u64::<LittleEndian>(self.offset)?;
-        writer.write_u32::<LittleEndian>(self.z_size)?;
-        writer.write_u32::<LittleEndian>(self.size)?;
-        Ok(())
-    }
-}
-
-impl FromReader for FileSegment {
-    fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
-        Ok(FileSegment {
-            offset: reader.read_u64::<LittleEndian>()?,
-            z_size: reader.read_u32::<LittleEndian>()?,
-            size: reader.read_u32::<LittleEndian>()?,
-        })
-    }
-}
-#[derive(Debug, Clone, Copy)]
-struct FileEntry {
-    name_hash_64: u64,
-    timestamp: u64, //SystemTime,
-    num_inline_buffer_segments: u32,
-    segments_start: u32,
-    segments_end: u32,
-    resource_dependencies_start: u32,
-    resource_dependencies_end: u32,
-    sha1_hash: [u8; 20],
-}
-
-impl FileEntry {
-    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u64::<LittleEndian>(self.name_hash_64)?;
-        writer.write_u64::<LittleEndian>(self.timestamp)?;
-        writer.write_u32::<LittleEndian>(self.num_inline_buffer_segments)?;
-        writer.write_u32::<LittleEndian>(self.segments_start)?;
-        writer.write_u32::<LittleEndian>(self.segments_end)?;
-        writer.write_u32::<LittleEndian>(self.resource_dependencies_start)?;
-        writer.write_u32::<LittleEndian>(self.resource_dependencies_end)?;
-        writer.write_all(self.sha1_hash.as_slice())?;
-        Ok(())
-    }
-}
-
-impl FromReader for FileEntry {
-    fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut entry = FileEntry {
-            name_hash_64: reader.read_u64::<LittleEndian>()?,
-            timestamp: reader.read_u64::<LittleEndian>()?,
-            num_inline_buffer_segments: reader.read_u32::<LittleEndian>()?,
-            segments_start: reader.read_u32::<LittleEndian>()?,
-            segments_end: reader.read_u32::<LittleEndian>()?,
-            resource_dependencies_start: reader.read_u32::<LittleEndian>()?,
-            resource_dependencies_end: reader.read_u32::<LittleEndian>()?,
-            sha1_hash: [0; 20],
-        };
-
-        reader.read_exact(&mut entry.sha1_hash[..])?;
-
-        Ok(entry)
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-struct Dependency {
-    hash: u64,
-}
-
-impl Dependency {
-    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u64::<LittleEndian>(self.hash)?;
-        Ok(())
-    }
-}
-#[warn(dead_code)]
-
-impl FromReader for Dependency {
-    fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
-        Ok(Dependency {
-            hash: reader.read_u64::<LittleEndian>()?,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-struct LxrsFooter {
-    files: Vec<String>,
-}
-
-impl LxrsFooter {
-    //const MINLEN: u32 = 20;
-    const MAGIC: u32 = 0x4C585253;
-    const VERSION: u32 = 1;
-
-    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u32::<LittleEndian>(self.files.len() as u32)?;
-        writer.write_u32::<LittleEndian>(LxrsFooter::VERSION)?;
-
-        // write strings to buffer
-        let mut buffer: Vec<u8> = Vec::new();
-        for f in &self.files {
-            write_null_terminated_string(&mut buffer, f.to_owned())?;
-        }
-
-        // compress
-        let size = buffer.len();
-        let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
-        let mut compressed_buffer = vec![0; compressed_size_needed as usize];
-        let zsize = compress(&buffer, &mut compressed_buffer, CompressionLevel::Normal);
-        assert!((zsize as u32) <= size as u32);
-        compressed_buffer.resize(zsize as usize, 0);
-
-        // write to writer
-        writer.write_all(&compressed_buffer)?;
-
-        Ok(())
-    }
-}
-impl FromReader for LxrsFooter {
-    fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let magic = reader.read_u32::<LittleEndian>()?;
-        if magic != LxrsFooter::MAGIC {
-            return Err(io::Error::new(io::ErrorKind::Other, "invalid magic"));
-        }
-        let _version = reader.read_u32::<LittleEndian>()?;
-        let size = reader.read_u32::<LittleEndian>()?;
-        let zsize = reader.read_u32::<LittleEndian>()?;
-        let count = reader.read_i32::<LittleEndian>()?;
-
-        let mut files: Vec<String> = vec![];
-        match size.cmp(&zsize) {
-            Ordering::Greater => {
-                // buffer is compressed
-                let mut compressed_buffer = vec![0; zsize as usize];
-                reader.read_exact(&mut compressed_buffer[..])?;
-                let mut output_buffer = vec![];
-                let result = decompress(compressed_buffer, &mut output_buffer, size as usize);
-                assert_eq!(result as u32, size);
-
-                // read from buffer
-                let mut inner_cursor = io::Cursor::new(&output_buffer);
-                for _i in 0..count {
-                    // read NullTerminatedString
-                    if let Ok(string) = read_null_terminated_string(&mut inner_cursor) {
-                        files.push(string);
-                    }
-                }
-            }
-            Ordering::Less => {
-                // error
-                return Err(io::Error::new(io::ErrorKind::Other, "invalid buffer"));
-            }
-            Ordering::Equal => {
-                // no compression
-                for _i in 0..count {
-                    // read NullTerminatedString
-                    if let Ok(string) = read_null_terminated_string(reader) {
-                        files.push(string);
-                    }
-                }
-            }
-        }
-
-        let footer = LxrsFooter { files };
-
-        Ok(footer)
-    }
+    Ok(())
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
