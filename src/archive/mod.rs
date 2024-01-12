@@ -250,7 +250,7 @@ where
         //let firstimportidx = imports_hash_set.len();
         //let mut lastimportidx = imports_hash_set.len();
         let mut flags = 0;
-        let mut segment: Option<FileSegment> = None;
+        let mut segment: FileSegment;
         let mut buffers = vec![];
 
         if let Ok(info) = read_cr2w_header(&mut file_cursor) {
@@ -280,7 +280,7 @@ where
             archive_writer.write_all(&compressed_buffer)?;
 
             // add metadata to archive
-            segment = Some(FileSegment::new(archive_offset, zsize as u32, size));
+            segment = FileSegment::new(archive_offset, zsize as u32, size);
 
             // write buffers (bytes after the main file)
             for buffer_info in info.buffers_table.iter() {
@@ -313,38 +313,37 @@ where
         } else {
             // write non-cr2w file
             file_cursor.seek(SeekFrom::Start(0))?;
-            if let Some(os_ext) = path.extension() {
-                let ext = os_ext.to_ascii_lowercase().to_string_lossy().to_string();
-                if get_aligned_file_extensions().contains(&ext) {
-                    pad_until_page(&mut archive_writer)?;
-                }
-
-                let offset = archive_writer.stream_position()?;
-                let size = file_buffer.len() as u32;
-                let final_zsize;
-                if get_uncompressed_file_extensions().contains(&ext) {
-                    // direct copy
-                    archive_writer.write_all(&file_buffer)?;
-                    final_zsize = size;
-                } else {
-                    // kark file
-                    let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
-                    let mut compressed_buffer = vec![0; compressed_size_needed as usize];
-                    let zsize = compress(
-                        &file_buffer,
-                        &mut compressed_buffer,
-                        CompressionLevel::Normal,
-                    );
-                    assert!((zsize as u32) <= size);
-                    compressed_buffer.resize(zsize as usize, 0);
-                    final_zsize = zsize as u32;
-                    // write
-                    archive_writer.write_all(&compressed_buffer)?;
-                }
-
-                // add metadata to archive
-                segment = Some(FileSegment::new(offset, final_zsize, size));
+            let os_ext = path.extension().unwrap();
+            let ext = os_ext.to_ascii_lowercase().to_string_lossy().to_string();
+            if get_aligned_file_extensions().contains(&ext) {
+                pad_until_page(&mut archive_writer)?;
             }
+
+            let offset = archive_writer.stream_position()?;
+            let size = file_buffer.len() as u32;
+            let final_zsize;
+            if get_uncompressed_file_extensions().contains(&ext) {
+                // direct copy
+                archive_writer.write_all(&file_buffer)?;
+                final_zsize = size;
+            } else {
+                // kark file
+                let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
+                let mut compressed_buffer = vec![0; compressed_size_needed as usize];
+                let zsize = compress(
+                    &file_buffer,
+                    &mut compressed_buffer,
+                    CompressionLevel::Normal,
+                );
+                assert!((zsize as u32) <= size);
+                compressed_buffer.resize(zsize as usize, 0);
+                final_zsize = zsize as u32;
+                // write
+                archive_writer.write_all(&compressed_buffer)?;
+            }
+
+            // add metadata to archive
+            segment = FileSegment::new(offset, final_zsize, size);
         }
 
         // update archive metadata
@@ -361,16 +360,15 @@ where
             sha1_hash,
         );
 
-        if let Some(segment) = segment {
-            let wrapped_entry = ZipEntry {
-                hash,
-                name: None,
-                entry,
-                segment,
-                buffers,
-            };
-            entries.insert(hash, wrapped_entry);
-        }
+        let wrapped_entry = ZipEntry {
+            hash,
+            name: None,
+            entry,
+            segment,
+            buffers,
+        };
+
+        entries.insert(hash, wrapped_entry);
     }
 
     // run through entries again and enumerate the segments
