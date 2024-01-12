@@ -4,6 +4,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::io::FromReader;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct Index {
     /// Offset from the beginning of this struct, should be 8
@@ -15,6 +16,8 @@ pub(crate) struct Index {
     file_segment_count: u32,
     resource_dependency_count: u32,
 }
+
+#[warn(dead_code)]
 
 impl Index {
     pub(crate) fn file_entry_count(&self) -> u32 {

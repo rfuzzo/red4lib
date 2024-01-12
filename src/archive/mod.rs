@@ -239,7 +239,7 @@ where
     // write files
     let mut file_segments_cnt = 0;
     let mut entries = HashMap::default();
-    let mut imports_hash_set: HashSet<String> = HashSet::new();
+    let imports_hash_set: HashSet<String> = HashSet::new();
 
     for (path, hash) in file_info {
         // read file
@@ -303,11 +303,11 @@ where
             }
 
             //register imports
-            for import in info.imports.iter() {
-                // TODO fix flags
-                // if (cr2WImportWrapper.Flags is not InternalEnums.EImportFlags.Soft and not InternalEnums.EImportFlags.Embedded)
-                imports_hash_set.insert(import.depot_path.to_owned());
-            }
+            // NOTE don't use a dependency list for mods
+            //for import in info.imports.iter() {
+            // if (cr2WImportWrapper.Flags is not InternalEnums.EImportFlags.Soft and not InternalEnums.EImportFlags.Embedded)
+            //imports_hash_set.insert(import.depot_path.to_owned());
+            //}
 
             lastimportidx = imports_hash_set.len();
             lastoffsetidx = file_segments_cnt;
@@ -523,15 +523,6 @@ pub struct ZipArchive<S> {
     /// The files inside an archive
     entries: HashMap<u64, ZipEntry>,
     dependencies: Vec<Dependency>,
-}
-
-impl<S> Drop for ZipArchive<S> {
-    fn drop(&mut self) {
-        // in update mode, we write on drop
-        if self.mode == ArchiveMode::Update {
-            todo!()
-        }
-    }
 }
 
 impl<S> ZipArchive<S> {
