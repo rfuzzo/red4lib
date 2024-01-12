@@ -4,7 +4,7 @@
 
 use std::{
     borrow::BorrowMut,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::{create_dir_all, File},
     io::{self, BufWriter, Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -237,23 +237,19 @@ where
     }
 
     // write files
-    let mut file_segments_cnt = 0;
+    //let imports_hash_set: HashSet<String> = HashSet::new();
     let mut entries = HashMap::default();
-    let imports_hash_set: HashSet<String> = HashSet::new();
-
     for (path, hash) in file_info {
         // read file
         let mut file = File::open(&path)?;
         let mut file_buffer = Vec::new();
         file.read_to_end(&mut file_buffer)?;
 
-        let firstimportidx = imports_hash_set.len();
-        let mut lastimportidx = imports_hash_set.len();
-        let firstoffsetidx = file_segments_cnt;
-        let mut lastoffsetidx = 0;
-        let mut flags = 0;
-
         let mut file_cursor = Cursor::new(&file_buffer);
+
+        //let firstimportidx = imports_hash_set.len();
+        //let mut lastimportidx = imports_hash_set.len();
+        let mut flags = 0;
         let mut segment: Option<FileSegment> = None;
         let mut buffers = vec![];
 
@@ -285,7 +281,6 @@ where
 
             // add metadata to archive
             segment = Some(FileSegment::new(archive_offset, zsize as u32, size));
-            file_segments_cnt += 1;
 
             // write buffers (bytes after the main file)
             for buffer_info in info.buffers_table.iter() {
@@ -299,7 +294,6 @@ where
 
                 // add metadata to archive
                 buffers.push(FileSegment::new(boffset, bzsize, bsize));
-                file_segments_cnt += 1;
             }
 
             //register imports
@@ -309,8 +303,8 @@ where
             //imports_hash_set.insert(import.depot_path.to_owned());
             //}
 
-            lastimportidx = imports_hash_set.len();
-            lastoffsetidx = file_segments_cnt;
+            //lastimportidx = imports_hash_set.len();
+
             flags = if !info.buffers_table.is_empty() {
                 info.buffers_table.len() - 1
             } else {
@@ -350,7 +344,6 @@ where
 
                 // add metadata to archive
                 segment = Some(FileSegment::new(offset, final_zsize, size));
-                file_segments_cnt += 1;
             }
         }
 
@@ -361,10 +354,10 @@ where
             hash,
             0,
             flags as u32,
-            firstoffsetidx as u32,
-            lastoffsetidx as u32,
-            firstimportidx as u32,
-            lastimportidx as u32,
+            0, //firstoffsetidx as u32,
+            0, //lastoffsetidx as u32,
+            0, //firstimportidx as u32,
+            0, //lastimportidx as u32,
             sha1_hash,
         );
 
@@ -380,18 +373,28 @@ where
         }
     }
 
+    // run through entries again and enumerate the segments
+    let mut file_segments_cnt = 0;
+    for (_hash, entry) in entries.iter_mut() {
+        let firstoffsetidx = file_segments_cnt;
+        file_segments_cnt += entry.buffers.len() + 1;
+        let lastoffsetidx = file_segments_cnt;
+        entry.entry.set_segments_start(firstoffsetidx as u32);
+        entry.entry.set_segments_end(lastoffsetidx as u32);
+    }
+
     // write footers
-    let dependencies = imports_hash_set
-        .iter()
-        .map(|e| Dependency::new(fnv1a64_hash_string(e)))
-        .collect::<Vec<_>>();
+    // let dependencies = imports_hash_set
+    //     .iter()
+    //     .map(|e| Dependency::new(fnv1a64_hash_string(e)))
+    //     .collect::<Vec<_>>();
 
     // padding
     pad_until_page(&mut archive_writer)?;
 
     // write tables
     let tableoffset = archive_writer.stream_position()?;
-    write_index(&mut archive_writer, &entries, &dependencies)?;
+    write_index(&mut archive_writer, &entries /*, &dependencies */)?;
     let tablesize = archive_writer.stream_position()? - tableoffset;
 
     // padding
@@ -522,7 +525,7 @@ pub struct ZipArchive<S> {
     dirty: bool,
     /// The files inside an archive
     entries: HashMap<u64, ZipEntry>,
-    dependencies: Vec<Dependency>,
+    pub dependencies: Vec<Dependency>,
 }
 
 impl<S> ZipArchive<S> {
@@ -819,7 +822,7 @@ impl<W: Write + Seek> ZipArchive<W> {
     ///
     /// This function will return an error if compression or io fails, or if the mode is Read.
     pub fn create_entry<P: AsRef<Path>>(
-        &self,
+        &mut self,
         _file_path: P,
         _compression_level: CompressionLevel,
     ) -> Result<ZipEntry> {
@@ -831,30 +834,25 @@ impl<W: Write + Seek> ZipArchive<W> {
             ));
         }
 
-        // todo write?
+        // write?
 
-        // update offsets?
+        // set dirty
+        self.dirty = true;
 
         todo!()
     }
 
     /// Deletes an entry from the archive
-    pub fn delete_entry(&mut self, hash: &u64) -> Result<ZipEntry> {
+    pub fn delete_entry(&mut self, hash: &u64) -> Option<ZipEntry> {
         // can only delete entries in update mode
         if self.mode != ArchiveMode::Update {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Archive is in read-only mode.",
-            ));
+            return None;
         }
 
-        // update internally
-        let _removed = self.entries.remove(hash);
+        // Set dirty
+        self.dirty = true;
 
-        todo!()
-
-        // todo write? update offsets?
-        //removed
+        self.entries.remove(hash)
     }
 }
 
@@ -896,16 +894,15 @@ impl ZipEntry {
 fn write_index<W: Write>(
     writer: &mut W,
     entries: &HashMap<u64, ZipEntry>,
-    dependencies: &[Dependency],
+    //dependencies: &[Dependency],
 ) -> Result<()> {
     let file_entry_count = entries.len() as u32;
     let buffer_counts = entries.iter().map(|e| e.1.buffers.len() + 1);
     let file_segment_count = buffer_counts.sum::<usize>() as u32;
-    let resource_dependency_count = dependencies.len() as u32;
+    let resource_dependency_count = 0; //dependencies.len() as u32;
 
-    // todo write table to buffer
+    // write table to buffer
     let mut buffer: Vec<u8> = Vec::new();
-    //let mut table_writer = Cursor::new(buffer);
     buffer.write_u32::<LittleEndian>(file_entry_count)?;
     buffer.write_u32::<LittleEndian>(file_segment_count)?;
     buffer.write_u32::<LittleEndian>(resource_dependency_count)?;
@@ -927,9 +924,9 @@ fn write_index<W: Write>(
     }
 
     // write dependencies
-    for dependency in dependencies {
-        dependency.write(&mut buffer)?;
-    }
+    // for dependency in dependencies {
+    //     dependency.write(&mut buffer)?;
+    // }
 
     // write to out stream
     let crc = crc64::crc64(0, buffer.as_slice());

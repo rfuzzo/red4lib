@@ -1,25 +1,25 @@
-use std::io::{Read, Result, Write};
+use std::io::{Read, Result};
 
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::io::FromReader;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Dependency {
+pub struct Dependency {
     hash: u64,
 }
 
-impl Dependency {
-    pub(crate) fn new(hash: u64) -> Self {
-        Self { hash }
-    }
+// impl Dependency {
+//     pub(crate) fn new(hash: u64) -> Self {
+//         Self { hash }
+//     }
 
-    pub(crate) fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u64::<LittleEndian>(self.hash)?;
-        Ok(())
-    }
-}
+//     pub(crate) fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
+//         writer.write_u64::<LittleEndian>(self.hash)?;
+//         Ok(())
+//     }
+// }
 #[warn(dead_code)]
 
 impl FromReader for Dependency {

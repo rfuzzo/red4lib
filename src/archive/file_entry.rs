@@ -62,6 +62,14 @@ impl FileEntry {
     pub(crate) fn segments_end(&self) -> u32 {
         self.segments_end
     }
+
+    pub(crate) fn set_segments_start(&mut self, segments_start: u32) {
+        self.segments_start = segments_start;
+    }
+
+    pub(crate) fn set_segments_end(&mut self, segments_end: u32) {
+        self.segments_end = segments_end;
+    }
 }
 
 impl FromReader for FileEntry {
