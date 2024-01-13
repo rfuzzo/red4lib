@@ -240,133 +240,7 @@ where
     //let imports_hash_set: HashSet<String> = HashSet::new();
     let mut entries = HashMap::default();
     for (path, hash) in file_info {
-        // read file
-        let mut file = File::open(&path)?;
-        let mut file_buffer = Vec::new();
-        file.read_to_end(&mut file_buffer)?;
-
-        let mut file_cursor = Cursor::new(&file_buffer);
-
-        //let firstimportidx = imports_hash_set.len();
-        //let mut lastimportidx = imports_hash_set.len();
-        let mut flags = 0;
-        let mut segment: FileSegment;
-        let mut buffers = vec![];
-
-        if let Ok(info) = read_cr2w_header(&mut file_cursor) {
-            // get main file
-            file_cursor.seek(SeekFrom::Start(0))?;
-            let size = info.header.objects_end;
-            let mut resource_buffer = vec![0; size as usize];
-            file_cursor.read_exact(&mut resource_buffer[..])?;
-            // get archive offset before writing
-            let archive_offset = archive_writer.stream_position()?;
-
-            // kark file
-            let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
-            let mut compressed_buffer = vec![0; compressed_size_needed as usize];
-            let zsize = compress(
-                &resource_buffer,
-                &mut compressed_buffer,
-                CompressionLevel::Normal,
-            );
-            assert!((zsize as u32) <= size);
-            compressed_buffer.resize(zsize as usize, 0);
-
-            // write compressed main file archive
-            // KARK header
-            archive_writer.write_u32::<LittleEndian>(kraken::MAGIC)?; //magic
-            archive_writer.write_u32::<LittleEndian>(size)?; //uncompressed buffer length
-            archive_writer.write_all(&compressed_buffer)?;
-
-            // add metadata to archive
-            segment = FileSegment::new(archive_offset, zsize as u32, size);
-
-            // write buffers (bytes after the main file)
-            for buffer_info in info.buffers_table.iter() {
-                let mut buffer = vec![0; buffer_info.disk_size as usize];
-                file_cursor.read_exact(&mut buffer[..])?;
-
-                let bsize = buffer_info.mem_size;
-                let bzsize = buffer_info.disk_size;
-                let boffset = archive_writer.stream_position()?;
-                archive_writer.write_all(buffer.as_slice())?;
-
-                // add metadata to archive
-                buffers.push(FileSegment::new(boffset, bzsize, bsize));
-            }
-
-            //register imports
-            // NOTE don't use a dependency list for mods
-            //for import in info.imports.iter() {
-            // if (cr2WImportWrapper.Flags is not InternalEnums.EImportFlags.Soft and not InternalEnums.EImportFlags.Embedded)
-            //imports_hash_set.insert(import.depot_path.to_owned());
-            //}
-
-            //lastimportidx = imports_hash_set.len();
-
-            flags = if !info.buffers_table.is_empty() {
-                info.buffers_table.len() - 1
-            } else {
-                0
-            };
-        } else {
-            // write non-cr2w file
-            file_cursor.seek(SeekFrom::Start(0))?;
-            let os_ext = path.extension().unwrap();
-            let ext = os_ext.to_ascii_lowercase().to_string_lossy().to_string();
-            if get_aligned_file_extensions().contains(&ext) {
-                pad_until_page(&mut archive_writer)?;
-            }
-
-            let offset = archive_writer.stream_position()?;
-            let size = file_buffer.len() as u32;
-            let final_zsize;
-            if get_uncompressed_file_extensions().contains(&ext) {
-                // direct copy
-                archive_writer.write_all(&file_buffer)?;
-                final_zsize = size;
-            } else {
-                // kark file
-                let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
-                let mut compressed_buffer = vec![0; compressed_size_needed as usize];
-                let zsize = compress(
-                    &file_buffer,
-                    &mut compressed_buffer,
-                    CompressionLevel::Normal,
-                );
-                assert!((zsize as u32) <= size);
-                compressed_buffer.resize(zsize as usize, 0);
-                final_zsize = zsize as u32;
-                // write
-                archive_writer.write_all(&compressed_buffer)?;
-            }
-
-            // add metadata to archive
-            segment = FileSegment::new(offset, final_zsize, size);
-        }
-
-        // update archive metadata
-        let sha1_hash = sha1_hash_file(&file_buffer);
-
-        let entry = FileEntry::new(
-            hash,
-            0,
-            flags as u32,
-            0, //firstoffsetidx as u32,
-            0, //lastoffsetidx as u32,
-            0, //firstimportidx as u32,
-            0, //lastimportidx as u32,
-            sha1_hash,
-        );
-
-        let wrapped_entry = ZipEntry {
-            hash,
-            name: None,
-            entry,
-            segment,
-            buffers,
-        };
+        let wrapped_entry = make_entry(path, &mut archive_writer, hash)?;
 
         entries.insert(hash, wrapped_entry);
     }
@@ -406,6 +280,133 @@ where
     archive_writer.write_u32::<LittleEndian>(custom_data_length as u32)?;
 
     Ok(())
+}
+
+fn make_entry<W: Write + Seek>(
+    path: PathBuf,
+    archive_writer: &mut BufWriter<W>,
+    hash: u64,
+) -> Result<ZipEntry> {
+    let mut file = File::open(&path)?;
+    let mut file_buffer = Vec::new();
+    file.read_to_end(&mut file_buffer)?;
+    let mut file_cursor = Cursor::new(&file_buffer);
+
+    let mut flags = 0;
+    let segment: FileSegment;
+    let mut buffers = vec![];
+
+    if let Ok(info) = read_cr2w_header(&mut file_cursor) {
+        // get main file
+        file_cursor.seek(SeekFrom::Start(0))?;
+        let size = info.header.objects_end;
+        let mut resource_buffer = vec![0; size as usize];
+        file_cursor.read_exact(&mut resource_buffer[..])?;
+        // get archive offset before writing
+        let archive_offset = archive_writer.stream_position()?;
+
+        // kark file
+        let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
+        let mut compressed_buffer = vec![0; compressed_size_needed as usize];
+        let zsize = compress(
+            &resource_buffer,
+            &mut compressed_buffer,
+            CompressionLevel::Normal,
+        );
+        assert!((zsize as u32) <= size);
+        compressed_buffer.resize(zsize as usize, 0);
+
+        // write compressed main file archive
+        // KARK header
+        archive_writer.write_u32::<LittleEndian>(kraken::MAGIC)?; //magic
+        archive_writer.write_u32::<LittleEndian>(size)?; //uncompressed buffer length
+        archive_writer.write_all(&compressed_buffer)?;
+
+        // add metadata to archive
+        segment = FileSegment::new(archive_offset, zsize as u32, size);
+
+        // write buffers (bytes after the main file)
+        for buffer_info in info.buffers_table.iter() {
+            let mut buffer = vec![0; buffer_info.disk_size as usize];
+            file_cursor.read_exact(&mut buffer[..])?;
+
+            let bsize = buffer_info.mem_size;
+            let bzsize = buffer_info.disk_size;
+            let boffset = archive_writer.stream_position()?;
+            archive_writer.write_all(buffer.as_slice())?;
+
+            // add metadata to archive
+            buffers.push(FileSegment::new(boffset, bzsize, bsize));
+        }
+
+        //register imports
+        // NOTE don't use a dependency list for mods
+        //for import in info.imports.iter() {
+        // if (cr2WImportWrapper.Flags is not InternalEnums.EImportFlags.Soft and not InternalEnums.EImportFlags.Embedded)
+        //imports_hash_set.insert(import.depot_path.to_owned());
+        //}
+
+        //lastimportidx = imports_hash_set.len();
+
+        flags = if !info.buffers_table.is_empty() {
+            info.buffers_table.len() - 1
+        } else {
+            0
+        };
+    } else {
+        // write non-cr2w file
+        file_cursor.seek(SeekFrom::Start(0))?;
+        let os_ext = path.extension().unwrap();
+        let ext = os_ext.to_ascii_lowercase().to_string_lossy().to_string();
+        if get_aligned_file_extensions().contains(&ext) {
+            pad_until_page(archive_writer)?;
+        }
+
+        let offset = archive_writer.stream_position()?;
+        let size = file_buffer.len() as u32;
+        let final_zsize;
+        if get_uncompressed_file_extensions().contains(&ext) {
+            // direct copy
+            archive_writer.write_all(&file_buffer)?;
+            final_zsize = size;
+        } else {
+            // kark file
+            let compressed_size_needed = get_compressed_buffer_size_needed(size as u64);
+            let mut compressed_buffer = vec![0; compressed_size_needed as usize];
+            let zsize = compress(
+                &file_buffer,
+                &mut compressed_buffer,
+                CompressionLevel::Normal,
+            );
+            assert!((zsize as u32) <= size);
+            compressed_buffer.resize(zsize as usize, 0);
+            final_zsize = zsize as u32;
+            // write
+            archive_writer.write_all(&compressed_buffer)?;
+        }
+
+        // add metadata to archive
+        segment = FileSegment::new(offset, final_zsize, size);
+    }
+    let sha1_hash = sha1_hash_file(&file_buffer);
+    let entry = FileEntry::new(
+        hash,
+        0,
+        flags as u32,
+        0, //firstoffsetidx as u32,
+        0, //lastoffsetidx as u32,
+        0, //firstimportidx as u32,
+        0, //lastimportidx as u32,
+        sha1_hash,
+    );
+    let wrapped_entry = ZipEntry {
+        hash,
+        name: None,
+        entry,
+        segment,
+        buffers,
+    };
+    Ok(wrapped_entry)
 }
 
 fn collect_resource_files<P: AsRef<Path>>(in_folder: &P) -> Vec<PathBuf> {
