@@ -3,10 +3,9 @@
 /////////////////////////////////////////////////////////////////////////////////////////
 
 use std::{
-    borrow::BorrowMut,
     collections::HashMap,
-    fs::{create_dir_all, File},
-    io::{self, BufWriter, Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write},
+    fs::File,
+    io::{BufWriter, Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -14,11 +13,17 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use strum::IntoEnumIterator;
 use walkdir::WalkDir;
 
+use crate::fnv1a64_hash_string;
 use crate::kraken::*;
 use crate::{cr2w::*, *};
-use crate::{fnv1a64_hash_string, io::FromReader};
 
-use self::{dependency::*, file_entry::*, file_segment::*, header::*, index::*, lxrs::*};
+use self::{
+    archiveinmemory::*, archivereadonly::*, dependency::*, file_entry::*, file_segment::*,
+    header::*, index::*, lxrs::*,
+};
+
+mod archiveinmemory;
+mod archivereadonly;
 
 mod dependency;
 mod file_entry;
@@ -107,7 +112,7 @@ where
     P: AsRef<Path>,
     R: Read + Seek + 'static,
 {
-    let mut archive = ZipArchive::from_reader_consume(source, ArchiveMode::Read)?;
+    let mut archive = ZipArchiveReadonly::from_reader_consume(source)?;
     archive.extract_to_directory(destination_directory_name, overwrite_files, hash_map)
 }
 
@@ -139,7 +144,7 @@ where
 /// # Errors
 ///
 /// This function will return an error if any io fails.
-pub fn open<P>(archive_file_name: P, mode: ArchiveMode) -> Result<ZipArchive<File>>
+/*pub fn open<P>(archive_file_name: P, mode: ArchiveMode) -> Result<ZipArchive<File>>
 where
     P: AsRef<Path>,
 {
@@ -154,8 +159,7 @@ where
             ZipArchive::from_reader_consume(file, mode)
         }
     }
-}
-
+}*/
 // public static System.IO.Compression.ZipArchive OpenRead (string archiveFileName);
 
 /// Opens an archive for reading at the specified path.
@@ -163,12 +167,12 @@ where
 /// # Errors
 ///
 /// This function will return an error if any io fails.
-pub fn open_read<P>(archive_file_name: P) -> Result<ZipArchive<File>>
+pub fn open_read<P>(archive_file_name: P) -> Result<ZipArchiveReadonly<File>>
 where
     P: AsRef<Path>,
 {
     let file = File::open(archive_file_name)?;
-    ZipArchive::from_reader_consume(file, ArchiveMode::Read)
+    ZipArchiveReadonly::from_reader_consume(file)
 }
 
 /// Packs redengine 4 resource file in a folder to an archive
@@ -506,353 +510,39 @@ fn pad_until_page<W: Write + Seek>(writer: &mut W) -> Result<()> {
 // API
 /////////////////////////////////////////////////////////////////////////////////////////
 
+/*
+
+https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.ziparchivemode?view=net-8.0
+
+When you set the mode to Read, the underlying file or stream must support reading, but does not have to support seeking. If the underlying file or stream supports seeking, the files are read from the archive as they are requested. If the underlying file or stream does not support seeking, the entire archive is held in memory.
+
+When you set the mode to Create, the underlying file or stream must support writing, but does not have to support seeking. Each entry in the archive can be opened only once for writing. If you create a single entry, the data is written to the underlying stream or file as soon as it is available. If you create multiple entries, such as by calling the CreateFromDirectory method, the data is written to the underlying stream or file after all the entries are created.
+
+When you set the mode to Update, the underlying file or stream must support reading, writing, and seeking.
+The content of the entire archive is held in memory, and no data is written to the underlying file or stream until the archive is disposed.
+
+*/
+
+// do we need this+
+// pub enum EArchive {
+//     ZipArchiveReadonly(ZipArchiveReadonly),
+//     ZipArchiveMemory(ZipArchiveMemory),
+// }
+
+// do we need this
+// pub trait IArchive {
+
+// }
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ArchiveMode {
     #[default]
-    Create,
+    /// Only reading archive entries is permitted.
     Read,
+    /// Only creating new archive entries is permitted.
+    Create,
+    /// Both read and write operations are permitted for archive entries.
     Update,
-}
-
-#[derive(Debug)]
-pub struct ZipArchive<S> {
-    /// wraps a stream
-    stream: S,
-
-    /// The read-write mode of the archive
-    mode: ArchiveMode,
-    dirty: bool,
-    /// The files inside an archive
-    entries: HashMap<u64, ZipEntry>,
-    pub dependencies: Vec<Dependency>,
-}
-
-impl<S> ZipArchive<S> {
-    /// Get an entry in the archive by resource path.
-    pub fn get_entry(&self, name: &str) -> Option<&ZipEntry> {
-        self.entries.get(&fnv1a64_hash_string(&name.to_owned()))
-    }
-
-    /// Get an entry in the archive by hash (FNV1a64 of resource path).
-    pub fn get_entry_by_hash(&self, hash: &u64) -> Option<&ZipEntry> {
-        self.entries.get(hash)
-    }
-}
-
-impl<R> ZipArchive<R>
-where
-    R: Read + Seek,
-{
-    /// Extracts a single entry to a directory path.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if the entry cannot be found or any io fails.
-    pub fn extract_entry<P: AsRef<Path>>(
-        &mut self,
-        entry: ZipEntry,
-        destination_directory_name: &P,
-        overwrite_files: bool,
-        hash_map: &HashMap<u64, String>,
-    ) -> Result<()> {
-        let Some(info) = entry.get_resolved_name(&hash_map) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Could not get entry info from archive.",
-            ));
-        };
-
-        // name or hash is a relative path
-        let outfile = destination_directory_name.as_ref().join(info);
-        create_dir_all(outfile.parent().expect("Could not create an out_dir"))?;
-
-        // extract to stream
-        let mut fs = if overwrite_files {
-            File::create(outfile)?
-        } else {
-            File::options()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(outfile)?
-        };
-
-        let writer = BufWriter::new(&mut fs);
-        self.extract_segments(&entry, writer)?;
-
-        Ok(())
-    }
-
-    /// Extracts a single entry by hash to a directory path.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if the entry cannot be found or any io fails.
-    pub fn extract_entry_by_hash<P: AsRef<Path>>(
-        &mut self,
-        hash: u64,
-        destination_directory_name: &P,
-        overwrite_files: bool,
-        hash_map: &HashMap<u64, String>,
-    ) -> Result<()> {
-        if let Some(entry) = self.get_entry_by_hash(&hash) {
-            self.extract_entry(
-                entry.clone(),
-                destination_directory_name,
-                overwrite_files,
-                hash_map,
-            )
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Could not find entry.",
-            ));
-        }
-    }
-
-    /// Extracts a single entry by resource path to a directory path.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if the entry cannot be found or any io fails.
-    pub fn extract_entry_by_name<P: AsRef<Path>>(
-        &mut self,
-        name: String,
-        destination_directory_name: &P,
-        overwrite_files: bool,
-        hash_map: &HashMap<u64, String>,
-    ) -> Result<()> {
-        if let Some(entry) = self.get_entry(&name) {
-            self.extract_entry(
-                entry.clone(),
-                destination_directory_name,
-                overwrite_files,
-                hash_map,
-            )
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Could not find entry.",
-            ));
-        }
-    }
-
-    /// Returns an open read stream to an entry of this [`ZipArchive<R>`].
-    pub fn open_entry<W: Write>(&mut self, entry: ZipEntry, writer: W) -> Result<()> {
-        self.extract_segments(&entry, writer)?;
-
-        Ok(())
-    }
-
-    /// Extracts all entries to the given directory.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if io fails.
-    pub fn extract_to_directory<P: AsRef<Path>>(
-        &mut self,
-        destination_directory_name: &P,
-        overwrite_files: bool,
-        hash_map: Option<HashMap<u64, String>>,
-    ) -> Result<()> {
-        let hash_map = if let Some(hash_map) = hash_map {
-            hash_map
-        } else {
-            get_red4_hashes()
-        };
-
-        // collect info
-        let mut entries: Vec<ZipEntry> = vec![];
-        for (_hash, entry) in &self.entries {
-            entries.push(entry.clone());
-        }
-
-        for entry in entries {
-            self.extract_entry(
-                entry,
-                destination_directory_name,
-                overwrite_files,
-                &hash_map,
-            )?;
-        }
-
-        Ok(())
-    }
-
-    // getters
-
-    fn reader_mut(&mut self) -> &mut R {
-        self.stream.borrow_mut()
-    }
-
-    // methods
-
-    /// Extracts segments to a writer, expects correct offset info.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if io fails
-    fn extract_segments<W: Write>(&mut self, entry: &ZipEntry, mut writer: W) -> Result<()> {
-        let segment = entry.segment;
-        let buffers = entry.buffers.clone();
-
-        if segment.size() == segment.z_size() {
-            // just copy
-            self.reader_mut().seek(SeekFrom::Start(segment.offset()))?;
-            let mut buffer = vec![0; segment.z_size() as usize];
-            self.reader_mut().read_exact(&mut buffer[..])?;
-            writer.write_all(&buffer)?;
-        } else {
-            decompress_segment(self.reader_mut(), &segment, &mut writer)?;
-        }
-        for segment in buffers {
-            self.reader_mut().seek(SeekFrom::Start(segment.offset()))?;
-            let mut buffer = vec![0; segment.z_size() as usize];
-            self.reader_mut().read_exact(&mut buffer[..])?;
-            writer.write_all(&buffer)?;
-        }
-
-        Ok(())
-    }
-
-    /// Opens an archive, needs to be read-only
-    fn from_reader_consume(mut reader: R, mode: ArchiveMode) -> Result<ZipArchive<R>> {
-        // checks
-        if mode == ArchiveMode::Create {
-            return Ok(ZipArchive::<R> {
-                stream: reader,
-                mode,
-                dirty: true,
-                entries: HashMap::default(),
-                dependencies: Vec::default(),
-            });
-        }
-
-        // read header
-        let header = Header::from_reader(&mut reader)?;
-
-        // read custom data
-        let mut file_names: HashMap<u64, String> = HashMap::default();
-        if let Ok(custom_data_length) = reader.read_u32::<LittleEndian>() {
-            if custom_data_length > 0 {
-                reader.seek(io::SeekFrom::Start(Header::HEADER_EXTENDED_SIZE))?;
-                if let Ok(footer) = LxrsFooter::from_reader(&mut reader) {
-                    // add files to hashmap
-                    for f in footer.files() {
-                        let hash = fnv1a64_hash_string(f);
-                        file_names.insert(hash, f.to_owned());
-                    }
-                }
-            }
-        }
-
-        // read index
-        // move to offset Header.IndexPosition
-        reader.seek(io::SeekFrom::Start(header.index_position()))?;
-        let index = Index::from_reader(&mut reader)?;
-
-        // read tables
-        let mut file_entries: HashMap<u64, FileEntry> = HashMap::default();
-        for _i in 0..index.file_entry_count() {
-            let entry = FileEntry::from_reader(&mut reader)?;
-            file_entries.insert(entry.name_hash_64(), entry);
-        }
-
-        let mut file_segments = Vec::default();
-        for _i in 0..index.file_segment_count() {
-            file_segments.push(FileSegment::from_reader(&mut reader)?);
-        }
-
-        // dependencies can't be connected to individual files anymore
-        let mut dependencies = Vec::default();
-        for _i in 0..index.resource_dependency_count() {
-            dependencies.push(Dependency::from_reader(&mut reader)?);
-        }
-
-        // construct wrapper
-        let mut entries = HashMap::default();
-        for (hash, entry) in file_entries.iter() {
-            let resolved = if let Some(name) = file_names.get(hash) {
-                Some(name.to_owned())
-            } else {
-                None
-            };
-
-            let start_index = entry.segments_start();
-            let next_index = entry.segments_end();
-            if let Some(segment) = file_segments.get(start_index as usize) {
-                let mut buffers: Vec<FileSegment> = vec![];
-                for i in start_index + 1..next_index {
-                    if let Some(buffer) = file_segments.get(i as usize) {
-                        buffers.push(*buffer);
-                    }
-                }
-
-                let zip_entry = ZipEntry {
-                    hash: *hash,
-                    name: resolved,
-                    entry: *entry,
-                    segment: *segment,
-                    buffers,
-                };
-                entries.insert(*hash, zip_entry);
-            }
-        }
-
-        let archive = ZipArchive::<R> {
-            stream: reader,
-            mode,
-            entries,
-            dependencies,
-            dirty: false,
-        };
-        Ok(archive)
-    }
-}
-
-impl<W: Write + Seek> ZipArchive<W> {
-    fn write(&mut self) {
-        todo!()
-    }
-
-    /// Compresses and adds a file to the archive.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if compression or io fails, or if the mode is Read.
-    pub fn create_entry<P: AsRef<Path>>(
-        &mut self,
-        _file_path: P,
-        _compression_level: CompressionLevel,
-    ) -> Result<ZipEntry> {
-        // can only add entries in update mode
-        if self.mode != ArchiveMode::Update {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Archive is in read-only mode.",
-            ));
-        }
-
-        // write?
-
-        // set dirty
-        self.dirty = true;
-
-        todo!()
-    }
-
-    /// Deletes an entry from the archive
-    pub fn delete_entry(&mut self, hash: &u64) -> Option<ZipEntry> {
-        // can only delete entries in update mode
-        if self.mode != ArchiveMode::Update {
-            return None;
-        }
-
-        // Set dirty
-        self.dirty = true;
-
-        self.entries.remove(hash)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -951,8 +641,8 @@ mod integration_tests {
 
     use crate::archive::open_read;
 
-    use super::FromReader;
     use super::LxrsFooter;
+    use crate::io::FromReader;
 
     #[test]
     fn read_srxl() {
