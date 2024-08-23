@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 
 use byteorder::WriteBytesExt;
 
-pub trait FromReader: Sized {
+pub(crate) trait FromReader: Sized {
     fn from_reader<R: Read>(reader: &mut R) -> io::Result<Self>;
 }
 
