@@ -197,7 +197,7 @@ pub fn get_red4_hashes() -> HashMap<u64, String> {
     let mut map: HashMap<u64, String> = HashMap::new();
 
     let reader = BufReader::new(&csv_data[..]);
-    for line in BufRead::lines(reader).flatten() {
+    for line in BufRead::lines(reader).map_while(Result::ok) {
         let mut split = line.split(',');
         if let Some(name) = split.next() {
             if let Some(hash_str) = split.next() {

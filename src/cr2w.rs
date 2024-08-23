@@ -7,6 +7,7 @@ use crate::io::{read_null_terminated_string, FromReader};
 
 // DTOs
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Import {
     pub class_name: String,
@@ -14,6 +15,7 @@ pub struct Import {
     pub flags: u16,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CR2WFileInfo {
     pub header: CR2WFileHeader,
@@ -31,6 +33,7 @@ pub struct CR2WFileInfo {
 
 // Real red4 data
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct CR2WFileHeader {
     pub version: u32,
@@ -60,6 +63,7 @@ impl FromReader for CR2WFileHeader {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Default, Debug, Clone, Copy)]
 pub struct CR2WTable {
     pub offset: u32,
@@ -77,6 +81,7 @@ impl FromReader for CR2WTable {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CR2WNameInfo {
     pub offset: u32,
@@ -107,6 +112,7 @@ impl FromReader for CR2WImportInfo {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CR2WPropertyInfo {
     pub class_name: u16,
@@ -127,6 +133,7 @@ impl FromReader for CR2WPropertyInfo {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CR2WExportInfo {
     pub class_name: u16,
@@ -151,6 +158,7 @@ impl FromReader for CR2WExportInfo {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CR2WBufferInfo {
     pub flags: u32,
@@ -173,6 +181,7 @@ impl FromReader for CR2WBufferInfo {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CR2WEmbeddedInfo {
     pub import_index: u32,

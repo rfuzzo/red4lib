@@ -10,12 +10,12 @@ byteorder = "1.5"
 fnv = "1.0"
 sha1 = "0.10"
 crc64 = "2.0"
-strum = "0.25"
-strum_macros = "0.25"
+strum = "0.26"
+strum_macros = "0.26"
 walkdir = "2.4"
 
 [build-dependencies.cmake]
 version = "0.1"
 
 [build-dependencies.zip]
-version = "0.6"
+version = "2.2"

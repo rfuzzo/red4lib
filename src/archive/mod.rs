@@ -555,7 +555,7 @@ where
         overwrite_files: bool,
         hash_map: &HashMap<u64, String>,
     ) -> Result<()> {
-        let Some(info) = entry.get_resolved_name(&hash_map) else {
+        let Some(info) = entry.get_resolved_name(hash_map) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Could not get entry info from archive.",
@@ -603,10 +603,10 @@ where
                 hash_map,
             )
         } else {
-            return Err(io::Error::new(
+            Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Could not find entry.",
-            ));
+            ))
         }
     }
 
@@ -630,10 +630,10 @@ where
                 hash_map,
             )
         } else {
-            return Err(io::Error::new(
+            Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Could not find entry.",
-            ));
+            ))
         }
     }
 
@@ -663,7 +663,7 @@ where
 
         // collect info
         let mut entries: Vec<ZipEntry> = vec![];
-        for (_hash, entry) in &self.entries {
+        for entry in self.entries.values() {
             entries.push(entry.clone());
         }
 
@@ -772,11 +772,7 @@ where
         // construct wrapper
         let mut entries = HashMap::default();
         for (hash, entry) in file_entries.iter() {
-            let resolved = if let Some(name) = file_names.get(hash) {
-                Some(name.to_owned())
-            } else {
-                None
-            };
+            let resolved = file_names.get(hash).map(|name| name.to_owned());
 
             let start_index = entry.segments_start();
             let next_index = entry.segments_end();
@@ -914,7 +910,7 @@ fn write_index<W: Write>(
         // collect offsets
         segments.push(entry.segment);
         for buffer in &entry.buffers {
-            segments.push(buffer.clone());
+            segments.push(*buffer);
         }
     }
     // write segments
@@ -987,8 +983,7 @@ mod integration_tests {
         let mut file_names = archive
             .entries
             .values()
-            .map(|f| f.name.to_owned())
-            .flatten()
+            .filter_map(|f| f.name.to_owned())
             .collect::<Vec<_>>();
         file_names.sort();
 
