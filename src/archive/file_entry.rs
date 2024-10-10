@@ -56,6 +56,10 @@ impl FileEntry {
         self.name_hash_64
     }
 
+    pub fn sha1_hash(&self) -> [u8; 20] {
+        self.sha1_hash
+    }
+
     pub(crate) fn segments_start(&self) -> u32 {
         self.segments_start
     }
