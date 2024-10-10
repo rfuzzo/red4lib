@@ -5,7 +5,7 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crate::io::FromReader;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FileEntry {
+pub struct FileEntry {
     name_hash_64: u64,
     timestamp: u64, //SystemTime,
     num_inline_buffer_segments: u32,

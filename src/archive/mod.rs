@@ -859,12 +859,12 @@ impl<W: Write + Seek> ZipArchive<W> {
 #[derive(Debug, Clone)]
 pub struct ZipEntry {
     /// FNV1a64 hash of the entry name
-    hash: u64,
+    pub hash: u64,
     /// Resolved resource path of that entry, this may not be available
     name: Option<String>,
 
     /// wrapped internal struct
-    entry: FileEntry,
+    pub entry: FileEntry,
     segment: FileSegment,
     buffers: Vec<FileSegment>,
 }
