@@ -17,6 +17,7 @@ pub(crate) struct FileEntry {
 }
 
 impl FileEntry {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         name_hash_64: u64,
         timestamp: u64,

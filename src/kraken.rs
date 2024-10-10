@@ -54,7 +54,7 @@ pub fn decompress(compressed_buffer: Vec<u8>, output_buffer: &mut Vec<u8>, size:
 
 /// Compresses a buffer into another
 pub fn compress(
-    uncompressed_buffer: &Vec<u8>,
+    #[allow(clippy::ptr_arg)] uncompressed_buffer: &Vec<u8>,
     compressed_buffer: &mut Vec<u8>,
     compression_level: CompressionLevel,
 ) -> i32 {

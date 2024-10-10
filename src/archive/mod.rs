@@ -537,6 +537,10 @@ impl<S> ZipArchive<S> {
     pub fn get_entry_by_hash(&self, hash: &u64) -> Option<&ZipEntry> {
         self.entries.get(hash)
     }
+
+    pub fn get_entries(&self) -> &HashMap<u64, ZipEntry> {
+        &self.entries
+    }
 }
 
 impl<R> ZipArchive<R>
@@ -807,6 +811,7 @@ where
 }
 
 impl<W: Write + Seek> ZipArchive<W> {
+    #[allow(dead_code)] // TODO: Implement
     fn write(&mut self) {
         todo!()
     }
