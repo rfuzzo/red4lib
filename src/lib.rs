@@ -17,6 +17,83 @@ use sha1::{Digest, Sha1};
 use strum_macros::{Display, EnumIter};
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// HELPERS
+/////////////////////////////////////////////////////////////////////////////////////////
+
+/// Calculate FNV1a64 hash of a String
+pub fn fnv1a64_hash_string(str: &String) -> u64 {
+    let mut hasher = fnv::FnvHasher::default();
+    hasher.write(str.as_bytes());
+    hasher.finish()
+}
+
+/// Calculate FNV1a64 hash of a PathBuf
+pub fn fnv1a64_hash_path(path: &Path) -> u64 {
+    let path_string = path.to_string_lossy();
+    let mut hasher = fnv::FnvHasher::default();
+    hasher.write(path_string.as_bytes());
+    hasher.finish()
+}
+
+pub fn sha1_hash_file(file_buffer: &Vec<u8>) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    hasher.update(file_buffer);
+    let result = hasher.finalize();
+    result.into()
+}
+
+/// Get vanilla resource path hashes https://www.cyberpunk.net/en/modding-support
+pub fn get_red4_hashes() -> HashMap<u64, String> {
+    let csv_data = include_bytes!("metadata-resources.csv");
+    let mut map: HashMap<u64, String> = HashMap::new();
+
+    let reader = BufReader::new(&csv_data[..]);
+    for line in BufRead::lines(reader).map_while(Result::ok) {
+        let mut split = line.split(',');
+        if let Some(name) = split.next() {
+            if let Some(hash_str) = split.next() {
+                if let Ok(hash) = hash_str.parse::<u64>() {
+                    map.insert(hash, name.to_owned());
+                }
+            }
+        }
+    }
+
+    map
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// TESTS
+/////////////////////////////////////////////////////////////////////////////////////////
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn load_order() {
+        let mut input = [
+            "#.archive",
+            "_.archive",
+            "aa.archive",
+            "zz.archive",
+            "AA.archive",
+            "ZZ.archive",
+        ];
+        let correct = [
+            "#.archive",
+            "AA.archive",
+            "ZZ.archive",
+            "_.archive",
+            "aa.archive",
+            "zz.archive",
+        ];
+
+        input.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        //input.sort();
+        assert_eq!(correct, input);
+    }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // RED4 LIB
 /////////////////////////////////////////////////////////////////////////////////////////
 
@@ -163,81 +240,4 @@ enum ERedExtension {
     xcube,
 
     wdyn,
-}
-#[warn(non_camel_case_types)]
-/////////////////////////////////////////////////////////////////////////////////////////
-// HELPERS
-/////////////////////////////////////////////////////////////////////////////////////////
-
-/// Calculate FNV1a64 hash of a String
-pub fn fnv1a64_hash_string(str: &String) -> u64 {
-    let mut hasher = fnv::FnvHasher::default();
-    hasher.write(str.as_bytes());
-    hasher.finish()
-}
-
-/// Calculate FNV1a64 hash of a PathBuf
-pub fn fnv1a64_hash_path(path: &Path) -> u64 {
-    let path_string = path.to_string_lossy();
-    let mut hasher = fnv::FnvHasher::default();
-    hasher.write(path_string.as_bytes());
-    hasher.finish()
-}
-
-pub fn sha1_hash_file(file_buffer: &Vec<u8>) -> [u8; 20] {
-    let mut hasher = Sha1::new();
-    hasher.update(file_buffer);
-    let result = hasher.finalize();
-    result.into()
-}
-
-/// Get vanilla resource path hashes https://www.cyberpunk.net/en/modding-support
-pub fn get_red4_hashes() -> HashMap<u64, String> {
-    let csv_data = include_bytes!("metadata-resources.csv");
-    let mut map: HashMap<u64, String> = HashMap::new();
-
-    let reader = BufReader::new(&csv_data[..]);
-    for line in BufRead::lines(reader).map_while(Result::ok) {
-        let mut split = line.split(',');
-        if let Some(name) = split.next() {
-            if let Some(hash_str) = split.next() {
-                if let Ok(hash) = hash_str.parse::<u64>() {
-                    map.insert(hash, name.to_owned());
-                }
-            }
-        }
-    }
-
-    map
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////
-// TESTS
-/////////////////////////////////////////////////////////////////////////////////////////
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn load_order() {
-        let mut input = [
-            "#.archive",
-            "_.archive",
-            "aa.archive",
-            "zz.archive",
-            "AA.archive",
-            "ZZ.archive",
-        ];
-        let correct = [
-            "#.archive",
-            "AA.archive",
-            "ZZ.archive",
-            "_.archive",
-            "aa.archive",
-            "zz.archive",
-        ];
-
-        input.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-        //input.sort();
-        assert_eq!(correct, input);
-    }
 }

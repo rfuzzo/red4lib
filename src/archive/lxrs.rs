@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    io::{Cursor, Error, ErrorKind, Read, Result, Write},
+    io::{Cursor, Read, Result, Write},
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -53,7 +53,7 @@ impl FromReader for LxrsFooter {
     fn from_reader<R: Read>(reader: &mut R) -> Result<Self> {
         let magic = reader.read_u32::<LittleEndian>()?;
         if magic != LxrsFooter::MAGIC {
-            return Err(Error::new(ErrorKind::Other, "invalid magic"));
+            return Err(std::io::Error::other("invalid magic"));
         }
         let _version = reader.read_u32::<LittleEndian>()?;
         let size = reader.read_u32::<LittleEndian>()?;
@@ -81,7 +81,7 @@ impl FromReader for LxrsFooter {
             }
             Ordering::Less => {
                 // error
-                return Err(Error::new(ErrorKind::Other, "invalid buffer"));
+                return Err(std::io::Error::other("invalid buffer"));
             }
             Ordering::Equal => {
                 // no compression

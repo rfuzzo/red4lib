@@ -18,7 +18,6 @@ pub(crate) struct Index {
 }
 
 #[warn(dead_code)]
-
 impl Index {
     pub(crate) fn file_entry_count(&self) -> u32 {
         self.file_entry_count

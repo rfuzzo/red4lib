@@ -21,7 +21,6 @@ pub struct Dependency {
 //     }
 // }
 #[warn(dead_code)]
-
 impl FromReader for Dependency {
     fn from_reader<R: Read>(reader: &mut R) -> Result<Self> {
         Ok(Dependency {

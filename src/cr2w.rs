@@ -199,7 +199,7 @@ impl FromReader for CR2WEmbeddedInfo {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-/// HELPERS
+// HELPERS
 /////////////////////////////////////////////////////////////////////////////////////////
 
 /// Reads the string table of a CR2W file
@@ -249,7 +249,7 @@ fn read_table<R: Read + Seek, T: FromReader>(
 pub fn read_cr2w_header<R: Read + Seek>(cursor: &mut R) -> io::Result<CR2WFileInfo> {
     let magic = cursor.read_u32::<LittleEndian>()?;
     if magic != CR2WFileHeader::MAGIC {
-        return Err(io::Error::new(io::ErrorKind::Other, "invalid magic"));
+        return Err(std::io::Error::other("invalid magic"));
     }
 
     let header = CR2WFileHeader::from_reader(cursor)?;
