@@ -37,7 +37,7 @@ pub fn sha1_hash_file(file_buffer: &Vec<u8>) -> [u8; 20] {
     result.into()
 }
 
-/// Get vanilla resource path hashes https://www.cyberpunk.net/en/modding-support
+/// Get vanilla resource path hashes from WolvenKit's usedhashes.kark
 pub fn get_red4_hashes() -> HashMap<u64, String> {
     let kark_data = include_bytes!("../WolvenKit/WolvenKit.Common/Resources/usedhashes.kark");
 
