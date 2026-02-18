@@ -1,3 +1,7 @@
 [submodule "kraken"]
 	path = kraken
 	url = https://github.com/WolvenKit/kraken
+[submodule "WolvenKit"]
+	path = WolvenKit
+	url = https://github.com/WolvenKit/WolvenKit
+	shallow = true

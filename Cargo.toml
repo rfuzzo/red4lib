@@ -16,6 +16,3 @@ walkdir = "2.4"
 
 [build-dependencies.cmake]
 version = "0.1"
-
-[build-dependencies.zip]
-version = "2.4"

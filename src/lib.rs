@@ -6,12 +6,7 @@ mod io;
 pub mod archive;
 pub mod kraken;
 
-use std::{
-    collections::HashMap,
-    hash::Hasher,
-    io::{BufRead, BufReader},
-    path::Path,
-};
+use std::{collections::HashMap, hash::Hasher, path::Path};
 
 use sha1::{Digest, Sha1};
 use strum_macros::{Display, EnumIter};
@@ -44,19 +39,28 @@ pub fn sha1_hash_file(file_buffer: &Vec<u8>) -> [u8; 20] {
 
 /// Get vanilla resource path hashes https://www.cyberpunk.net/en/modding-support
 pub fn get_red4_hashes() -> HashMap<u64, String> {
-    let csv_data = include_bytes!("metadata-resources.csv");
-    let mut map: HashMap<u64, String> = HashMap::new();
+    let kark_data = include_bytes!("../WolvenKit/WolvenKit.Common/Resources/usedhashes.kark");
 
-    let reader = BufReader::new(&csv_data[..]);
-    for line in BufRead::lines(reader).map_while(Result::ok) {
-        let mut split = line.split(',');
-        if let Some(name) = split.next() {
-            if let Some(hash_str) = split.next() {
-                if let Ok(hash) = hash_str.parse::<u64>() {
-                    map.insert(hash, name.to_owned());
-                }
-            }
+    // parse KARK header: 4-byte magic, 4-byte decompressed size
+    let magic = u32::from_le_bytes(kark_data[0..4].try_into().unwrap());
+    assert_eq!(magic, kraken::MAGIC, "Invalid KARK magic");
+    let decompressed_size = u32::from_le_bytes(kark_data[4..8].try_into().unwrap()) as usize;
+
+    // decompress
+    let compressed = kark_data[8..].to_vec();
+    let mut decompressed = Vec::new();
+    kraken::decompress(compressed, &mut decompressed, decompressed_size);
+
+    // parse: one resource path per line, compute FNV1a64 hash
+    let text = String::from_utf8_lossy(&decompressed);
+    let mut map: HashMap<u64, String> = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
         }
+        let hash = fnv1a64_hash_string(&line.to_string());
+        map.insert(hash, line.to_owned());
     }
 
     map
