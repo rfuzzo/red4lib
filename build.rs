@@ -19,6 +19,7 @@ fn main() {
         // link rustc
         println!("cargo:rustc-link-search=native={}", link_path.display());
         println!("cargo:rustc-link-lib-l=static={}", TARGET_NAME);
+        println!("cargo:rustc-link-lib=stdc++");
     } else {
         // cmake config
         let mut cfg = Config::new(LIB_NAME);
